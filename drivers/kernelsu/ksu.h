@@ -5,7 +5,7 @@
 #include <linux/workqueue.h>
 #include <linux/cred.h>
 
-#define KERNEL_SU_VERSION KSU_VERSION
+#define KERNEL_SU_VERSION 40200
 #define KERNEL_SU_VERSION_TAG KSU_VERSION_TAG
 
 #define EVENT_POST_FS_DATA 1
