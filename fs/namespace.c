@@ -1960,6 +1960,7 @@ int path_umount(struct path *path, int flags)
 	mntput_no_expire(mnt);
 	return ret;
 }
+EXPORT_SYMBOL_GPL(path_umount);
 
 /*
  * Now umount can handle mount points as well as block devices.
@@ -4382,13 +4383,13 @@ struct vfsmount *susfs_get_non_sus_vfsmnt_from_vfsmnt(struct vfsmount *vfsmnt) {
 	return &mnt->mnt;
 }
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-int __visible path_umount(struct path *path, int flags) 
-{ 
-    struct mount *mnt = real_mount(path->mnt); 
-    if (!(flags & UMOUNT_NOFOLLOW) && 
-        !(mnt->mnt.mnt_flags & MNT_INTERNAL) && 
-        follow_down(path)) 
-        return -ELOOP; 
-    return do_umount(mnt, flags); 
-}
-EXPORT_SYMBOL_GPL(path_umount);
+//int __visible path_umount(struct path *path, int flags) 
+//{ 
+//    struct mount *mnt = real_mount(path->mnt); 
+//    if (!(flags & UMOUNT_NOFOLLOW) && 
+//        !(mnt->mnt.mnt_flags & MNT_INTERNAL) && 
+//        follow_down(path)) 
+//        return -ELOOP; 
+//    return do_umount(mnt, flags); 
+//}
+//
