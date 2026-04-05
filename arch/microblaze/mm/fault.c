@@ -91,7 +91,7 @@ void do_page_fault(struct pt_regs *regs, unsigned long address,
 	int code = SEGV_MAPERR;
 	int is_write = error_code & ESR_S;
 	vm_fault_t fault;
-	unsigned int flags = FAULT_FLAG_DEFAULT;
+	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
 
 	regs->ear = address;
 	regs->esr = error_code;
@@ -137,12 +137,12 @@ void do_page_fault(struct pt_regs *regs, unsigned long address,
 	 * source.  If this is invalid we can skip the address space check,
 	 * thus avoiding the deadlock.
 	 */
-	if (unlikely(!mmap_read_trylock(mm))) {
+	if (unlikely(!down_read_trylock(&mm->mmap_sem))) {
 		if (kernel_mode(regs) && !search_exception_tables(regs->pc))
 			goto bad_area_nosemaphore;
 
 retry:
-		mmap_read_lock(mm);
+		down_read(&mm->mmap_sem);
 	}
 
 	vma = find_vma(mm, address);
@@ -217,7 +217,7 @@ good_area:
 	 */
 	fault = handle_mm_fault(vma, address, flags);
 
-	if (fault_signal_pending(fault, regs))
+	if ((fault & VM_FAULT_RETRY) && fatal_signal_pending(current))
 		return;
 
 	if (unlikely(fault & VM_FAULT_ERROR)) {
@@ -236,6 +236,7 @@ good_area:
 		else
 			current->min_flt++;
 		if (fault & VM_FAULT_RETRY) {
+			flags &= ~FAULT_FLAG_ALLOW_RETRY;
 			flags |= FAULT_FLAG_TRIED;
 
 			/*
@@ -248,7 +249,7 @@ good_area:
 		}
 	}
 
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 
 	/*
 	 * keep track of tlb+htab misses that are good addrs but
@@ -259,7 +260,7 @@ good_area:
 	return;
 
 bad_area:
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 
 bad_area_nosemaphore:
 	pte_errors++;
@@ -278,7 +279,7 @@ bad_area_nosemaphore:
  * us unable to handle the page fault gracefully.
  */
 out_of_memory:
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 	if (!user_mode(regs))
 		bad_page_fault(regs, address, SIGKILL);
 	else
@@ -286,7 +287,7 @@ out_of_memory:
 	return;
 
 do_sigbus:
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 	if (user_mode(regs)) {
 		force_sig_fault(SIGBUS, BUS_ADRERR, (void __user *)address);
 		return;

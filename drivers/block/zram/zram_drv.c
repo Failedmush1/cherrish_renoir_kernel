@@ -41,7 +41,7 @@ static DEFINE_IDR(zram_index_idr);
 static DEFINE_MUTEX(zram_index_mutex);
 
 static int zram_major;
-static const char *default_compressor = "zstd";
+static const char *default_compressor = "lzo-rle";
 
 /* Module params (documentation at end) */
 static unsigned int num_devices = 1;
@@ -207,17 +207,14 @@ static inline void zram_fill_page(void *ptr, unsigned long len,
 
 static bool page_same_filled(void *ptr, unsigned long *element)
 {
+	unsigned int pos;
 	unsigned long *page;
 	unsigned long val;
-	unsigned int pos, last_pos = PAGE_SIZE / sizeof(*page) - 1;
 
 	page = (unsigned long *)ptr;
 	val = page[0];
 
-	if (val != page[last_pos])
-		return false;
-
-	for (pos = 1; pos < last_pos; pos++) {
+	for (pos = 1; pos < PAGE_SIZE / sizeof(*page); pos++) {
 		if (val != page[pos])
 			return false;
 	}
@@ -498,6 +495,12 @@ static ssize_t backing_dev_store(struct device *dev,
 	}
 
 	nr_pages = i_size_read(inode) >> PAGE_SHIFT;
+	/* Refuse to use zero sized device (also prevents self reference) */
+	if (!nr_pages) {
+		err = -EINVAL;
+		goto out;
+	}
+
 	bitmap_sz = BITS_TO_LONGS(nr_pages) * sizeof(long);
 	bitmap = kvzalloc(bitmap_sz, GFP_KERNEL);
 	if (!bitmap) {
@@ -1367,16 +1370,13 @@ compress_again:
 				__GFP_KSWAPD_RECLAIM |
 				__GFP_NOWARN |
 				__GFP_HIGHMEM |
-				__GFP_MOVABLE |
-				__GFP_CMA |
-				__GFP_OFFLINABLE);
+				__GFP_MOVABLE);
 	if (!handle) {
 		zcomp_stream_put(zram->comp);
 		atomic64_inc(&zram->stats.writestall);
 		handle = zs_malloc(zram->mem_pool, comp_len,
 				GFP_NOIO | __GFP_HIGHMEM |
-				__GFP_MOVABLE | __GFP_CMA |
-				__GFP_OFFLINABLE);
+				__GFP_MOVABLE);
 		if (handle)
 			goto compress_again;
 		return -ENOMEM;
@@ -2100,8 +2100,6 @@ static void destroy_devices(void)
 static int __init zram_init(void)
 {
 	int ret;
-
-	BUILD_BUG_ON(__NR_ZRAM_PAGEFLAGS > BITS_PER_LONG);
 
 	ret = cpuhp_setup_state_multi(CPUHP_ZCOMP_PREPARE, "block/zram:prepare",
 				      zcomp_cpu_up_prepare, zcomp_cpu_dead);

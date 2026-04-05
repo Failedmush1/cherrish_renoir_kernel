@@ -18,9 +18,6 @@
 #include <linux/sched/loadavg.h>
 #include <linux/sched/stat.h>
 #include <linux/math64.h>
-#ifdef CONFIG_QGKI_MENU_GOV_DEBUG
-#include <trace/events/power.h>
-#endif
 
 /*
  * Please note when changing the tuning values:
@@ -261,8 +258,16 @@ again:
 	 *
 	 * This can deal with workloads that have long pauses interspersed
 	 * with sporadic activity with a bunch of short pauses.
+	 *
+	 * However, if the number of remaining samples is too small to exclude
+	 * any more outliers, allow the deepest available idle state to be
+	 * selected because there are systems where the time spent by CPUs in
+	 * deep idle states is correlated to the maximum frequency the CPUs
+	 * can get to.  On those systems, shallow idle states should be avoided
+	 * unless there is a clear indication that the given CPU is most likley
+	 * going to be woken up shortly.
 	 */
-	if ((divisor * 4) <= INTERVALS * 3)
+	if (divisor * 4 <= INTERVALS * 3)
 		return UINT_MAX;
 
 	thresh = max - 1;
@@ -280,9 +285,6 @@ static int menu_select(struct cpuidle_driver *drv, struct cpuidle_device *dev,
 {
 	struct menu_device *data = this_cpu_ptr(&menu_devices);
 	int latency_req = cpuidle_governor_latency_req(dev->cpu);
-#ifdef CONFIG_QGKI_MENU_GOV_DEBUG
-	int qos = latency_req;
-#endif
 	int i;
 	int idx;
 	unsigned int interactivity_req;
@@ -311,9 +313,6 @@ static int menu_select(struct cpuidle_driver *drv, struct cpuidle_device *dev,
 		 * polling one.
 		 */
 		*stop_tick = !(drv->states[0].flags & CPUIDLE_FLAG_POLLING);
-#ifdef CONFIG_QGKI_MENU_GOV_DEBUG
-		trace_cpuidle_select(dev->cpu, 0, 0, *stop_tick, 0);
-#endif
 		return 0;
 	}
 
@@ -402,11 +401,6 @@ static int menu_select(struct cpuidle_driver *drv, struct cpuidle_device *dev,
 			    s->target_residency <= ktime_to_us(delta_next))
 				idx = i;
 
-#ifdef CONFIG_QGKI_MENU_GOV_DEBUG
-			trace_cpuidle_select(dev->cpu, predicted_us, qos,
-					     *stop_tick, idx);
-#endif
-
 			return idx;
 		}
 		if (s->exit_latency > latency_req)
@@ -447,9 +441,6 @@ static int menu_select(struct cpuidle_driver *drv, struct cpuidle_device *dev,
 		}
 	}
 
-#ifdef CONFIG_QGKI_MENU_GOV_DEBUG
-	trace_cpuidle_select(dev->cpu, predicted_us, qos, *stop_tick, idx);
-#endif
 	return idx;
 }
 

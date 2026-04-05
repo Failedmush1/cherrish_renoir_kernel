@@ -35,16 +35,8 @@
 #include <linux/prefetch.h>
 #include <linux/memcontrol.h>
 #include <linux/random.h>
-#include <trace/events/kmem.h>
-#ifdef CONFIG_QCOM_MINIDUMP_PANIC_DUMP
-#include <soc/qcom/minidump.h>
-#include <linux/debugfs.h>
-#include <linux/jhash.h>
-#endif
 
-#ifdef CONFIG_SLUB_DEBUG
-#include <linux/debugfs.h>
-#endif
+#include <trace/events/kmem.h>
 
 #include "internal.h"
 
@@ -450,38 +442,19 @@ static inline bool cmpxchg_double_slab(struct kmem_cache *s, struct page *page,
 }
 
 #ifdef CONFIG_SLUB_DEBUG
-static unsigned long object_map[BITS_TO_LONGS(MAX_OBJS_PER_PAGE)];
-static DEFINE_SPINLOCK(object_map_lock);
-
 /*
  * Determine a map of object in use on a page.
  *
  * Node listlock must be held to guarantee that the page does
  * not vanish from under us.
  */
-static unsigned long *get_map(struct kmem_cache *s, struct page *page)
+static void get_map(struct kmem_cache *s, struct page *page, unsigned long *map)
 {
 	void *p;
 	void *addr = page_address(page);
 
-	VM_BUG_ON(!irqs_disabled());
-
-	spin_lock(&object_map_lock);
-
-	bitmap_zero(object_map, page->objects);
-
 	for (p = page->freelist; p; p = get_freepointer(s, p))
-		set_bit(slab_index(p, s, addr), object_map);
-
-	return object_map;
-}
-
-static void put_map(unsigned long *map)
-{
-	VM_BUG_ON(map != object_map);
-	lockdep_assert_held(&object_map_lock);
-
-	spin_unlock(&object_map_lock);
+		set_bit(slab_index(p, s, addr), map);
 }
 
 static inline unsigned int size_from_object(struct kmem_cache *s)
@@ -742,18 +715,16 @@ static void print_trailer(struct kmem_cache *s, struct page *page, u8 *p)
 	dump_stack();
 }
 
-static void slab_panic(const char *cause)
-{
-	if (IS_ENABLED(CONFIG_SLUB_DEBUG_PANIC_ON))
-		panic("%s\n", cause);
-}
-
 void object_err(struct kmem_cache *s, struct page *page,
 			u8 *object, char *reason)
 {
 	slab_bug(s, "%s", reason);
-	print_trailer(s, page, object);
-	slab_panic(reason);
+	if (!object || !check_valid_pointer(s, page, object)) {
+		print_page_info(page);
+		pr_err("Invalid pointer 0x%p\n", object);
+	} else {
+		print_trailer(s, page, object);
+	}
 }
 
 static __printf(3, 4) void slab_err(struct kmem_cache *s, struct page *page,
@@ -768,7 +739,6 @@ static __printf(3, 4) void slab_err(struct kmem_cache *s, struct page *page,
 	slab_bug(s, "%s", buf);
 	print_page_info(page);
 	dump_stack();
-	slab_panic("slab error");
 }
 
 static void init_object(struct kmem_cache *s, void *object, u8 val)
@@ -790,7 +760,6 @@ static void init_object(struct kmem_cache *s, void *object, u8 val)
 static void restore_bytes(struct kmem_cache *s, char *message, u8 data,
 						void *from, void *to)
 {
-	slab_panic("object poison overwritten");
 	slab_fix(s, "Restoring 0x%p-0x%p=0x%x\n", from, to - 1, data);
 	memset(from, data, to - from);
 }
@@ -1605,25 +1574,6 @@ static int init_cache_random_seq(struct kmem_cache *s)
 	return 0;
 }
 
-/* re-initialize the random sequence cache */
-static int reinit_cache_random_seq(struct kmem_cache *s)
-{
-	int err;
-
-	if (s->random_seq) {
-		cache_random_seq_destroy(s);
-		err = init_cache_random_seq(s);
-
-		if (err) {
-			pr_err("SLUB: Unable to re-initialize random sequence cache for %s\n",
-				s->name);
-			return err;
-		}
-	}
-
-	return 0;
-}
-
 /* Initialize each random sequence freelist per cache */
 static void __init init_freelist_randomization(void)
 {
@@ -1695,10 +1645,6 @@ static bool shuffle_freelist(struct kmem_cache *s, struct page *page)
 }
 #else
 static inline int init_cache_random_seq(struct kmem_cache *s)
-{
-	return 0;
-}
-static inline int reinit_cache_random_seq(struct kmem_cache *s)
 {
 	return 0;
 }
@@ -3804,12 +3750,13 @@ static void list_slab_objects(struct kmem_cache *s, struct page *page,
 #ifdef CONFIG_SLUB_DEBUG
 	void *addr = page_address(page);
 	void *p;
-	unsigned long *map;
-
+	unsigned long *map = bitmap_zalloc(page->objects, GFP_ATOMIC);
+	if (!map)
+		return;
 	slab_err(s, page, text, s->name);
 	slab_lock(page);
 
-	map = get_map(s, page);
+	get_map(s, page, map);
 	for_each_object(p, s, addr, page->objects) {
 
 		if (!test_bit(slab_index(p, s, addr), map)) {
@@ -3817,9 +3764,8 @@ static void list_slab_objects(struct kmem_cache *s, struct page *page,
 			print_tracking(s, p);
 		}
 	}
-	put_map(map);
-
 	slab_unlock(page);
+	bitmap_free(map);
 #endif
 }
 
@@ -4515,33 +4461,43 @@ static int count_total(struct page *page)
 #endif
 
 #ifdef CONFIG_SLUB_DEBUG
-static void validate_slab(struct kmem_cache *s, struct page *page)
+static int validate_slab(struct kmem_cache *s, struct page *page,
+						unsigned long *map)
 {
 	void *p;
 	void *addr = page_address(page);
-	unsigned long *map;
 
-	slab_lock(page);
-
-	if (!check_slab(s, page) || !on_freelist(s, page, NULL))
-		goto unlock;
+	if (!check_slab(s, page) ||
+			!on_freelist(s, page, NULL))
+		return 0;
 
 	/* Now we know that a valid freelist exists */
-	map = get_map(s, page);
-	for_each_object(p, s, addr, page->objects) {
-		u8 val = test_bit(slab_index(p, s, addr), map) ?
-			 SLUB_RED_INACTIVE : SLUB_RED_ACTIVE;
+	bitmap_zero(map, page->objects);
 
-		if (!check_object(s, page, p, val))
-			break;
+	get_map(s, page, map);
+	for_each_object(p, s, addr, page->objects) {
+		if (test_bit(slab_index(p, s, addr), map))
+			if (!check_object(s, page, p, SLUB_RED_INACTIVE))
+				return 0;
 	}
-	put_map(map);
-unlock:
+
+	for_each_object(p, s, addr, page->objects)
+		if (!test_bit(slab_index(p, s, addr), map))
+			if (!check_object(s, page, p, SLUB_RED_ACTIVE))
+				return 0;
+	return 1;
+}
+
+static void validate_slab_slab(struct kmem_cache *s, struct page *page,
+						unsigned long *map)
+{
+	slab_lock(page);
+	validate_slab(s, page, map);
 	slab_unlock(page);
 }
 
 static int validate_slab_node(struct kmem_cache *s,
-		struct kmem_cache_node *n)
+		struct kmem_cache_node *n, unsigned long *map)
 {
 	unsigned long count = 0;
 	struct page *page;
@@ -4550,7 +4506,7 @@ static int validate_slab_node(struct kmem_cache *s,
 	spin_lock_irqsave(&n->list_lock, flags);
 
 	list_for_each_entry(page, &n->partial, slab_list) {
-		validate_slab(s, page);
+		validate_slab_slab(s, page, map);
 		count++;
 	}
 	if (count != n->nr_partial)
@@ -4561,7 +4517,7 @@ static int validate_slab_node(struct kmem_cache *s,
 		goto out;
 
 	list_for_each_entry(page, &n->full, slab_list) {
-		validate_slab(s, page);
+		validate_slab_slab(s, page, map);
 		count++;
 	}
 	if (count != atomic_long_read(&n->nr_slabs))
@@ -4578,11 +4534,15 @@ static long validate_slab_cache(struct kmem_cache *s)
 	int node;
 	unsigned long count = 0;
 	struct kmem_cache_node *n;
+	unsigned long *map = bitmap_alloc(oo_objects(s->max), GFP_KERNEL);
+
+	if (!map)
+		return -ENOMEM;
 
 	flush_all(s);
 	for_each_kmem_cache_node(s, node, n)
-		count += validate_slab_node(s, n);
-
+		count += validate_slab_node(s, n, map);
+	bitmap_free(map);
 	return count;
 }
 /*
@@ -4600,9 +4560,6 @@ struct location {
 	long max_pid;
 	DECLARE_BITMAP(cpus, NR_CPUS);
 	nodemask_t nodes;
-#ifdef CONFIG_STACKTRACE
-	unsigned long addrs[TRACK_ADDRS_COUNT]; /* Called from address */
-#endif
 };
 
 struct loc_track {
@@ -4645,7 +4602,6 @@ static int add_location(struct loc_track *t, struct kmem_cache *s,
 	struct location *l;
 	unsigned long caddr;
 	unsigned long age = jiffies - track->when;
-	unsigned int i = 0;
 
 	start = -1;
 	end = t->count;
@@ -4703,15 +4659,6 @@ static int add_location(struct loc_track *t, struct kmem_cache *s,
 	t->count++;
 	l->count = 1;
 	l->addr = track->addr;
-#ifdef CONFIG_STACKTRACE
-	for (i = 0; i < TRACK_ADDRS_COUNT; i++)
-		if (l->addrs[i]) {
-			l->addrs[i] = track->addrs[i];
-			continue;
-		} else
-			break;
-
-#endif
 	l->sum_time = age;
 	l->min_time = age;
 	l->max_time = age;
@@ -4725,17 +4672,18 @@ static int add_location(struct loc_track *t, struct kmem_cache *s,
 }
 
 static void process_slab(struct loc_track *t, struct kmem_cache *s,
-		struct page *page, enum track_item alloc)
+		struct page *page, enum track_item alloc,
+		unsigned long *map)
 {
 	void *addr = page_address(page);
 	void *p;
-	unsigned long *map;
 
-	map = get_map(s, page);
+	bitmap_zero(map, page->objects);
+	get_map(s, page, map);
+
 	for_each_object(p, s, addr, page->objects)
 		if (!test_bit(slab_index(p, s, addr), map))
 			add_location(t, s, get_track(s, p, alloc));
-	put_map(map);
 }
 
 static int list_locations(struct kmem_cache *s, char *buf,
@@ -4746,9 +4694,11 @@ static int list_locations(struct kmem_cache *s, char *buf,
 	struct loc_track t = { 0, 0, NULL };
 	int node;
 	struct kmem_cache_node *n;
+	unsigned long *map = bitmap_alloc(oo_objects(s->max), GFP_KERNEL);
 
-	if (!alloc_loc_track(&t, PAGE_SIZE / sizeof(struct location),
-			     GFP_KERNEL)) {
+	if (!map || !alloc_loc_track(&t, PAGE_SIZE / sizeof(struct location),
+				     GFP_KERNEL)) {
+		bitmap_free(map);
 		return sprintf(buf, "Out of memory\n");
 	}
 	/* Push back cpu slabs */
@@ -4763,9 +4713,9 @@ static int list_locations(struct kmem_cache *s, char *buf,
 
 		spin_lock_irqsave(&n->list_lock, flags);
 		list_for_each_entry(page, &n->partial, slab_list)
-			process_slab(&t, s, page, alloc);
+			process_slab(&t, s, page, alloc, map);
 		list_for_each_entry(page, &n->full, slab_list)
-			process_slab(&t, s, page, alloc);
+			process_slab(&t, s, page, alloc, map);
 		spin_unlock_irqrestore(&n->list_lock, flags);
 	}
 
@@ -4814,180 +4764,11 @@ static int list_locations(struct kmem_cache *s, char *buf,
 	}
 
 	free_loc_track(&t);
+	bitmap_free(map);
 	if (!t.count)
 		len += sprintf(buf, "No data\n");
 	return len;
 }
-
-#ifdef CONFIG_QCOM_MINIDUMP_PANIC_DUMP
-
-#define STACK_HASH_SEED 0x9747b28c
-
-static unsigned long slab_owner_filter;
-static unsigned long slab_owner_handles_size = SZ_16K;
-static int num_handles;
-
-bool is_slub_debug_enabled(void)
-{
-	if (slub_debug)
-		return true;
-	return false;
-}
-
-static bool find_stack(u32 handle,
-		 char *md_slabowner_dump_addr, char *cur)
-{
-	int *handles, i;
-
-	handles = (int *) (md_slabowner_dump_addr +
-			md_slabowner_dump_size - slab_owner_handles_size);
-
-	for (i = 0; i < num_handles; i++)
-		if (handle == handles[i])
-			return true;
-
-	if ((handles + num_handles)
-		< (int *)(md_slabowner_dump_addr +
-			md_slabowner_dump_size)) {
-		handles[num_handles] = handle;
-		num_handles += 1;
-	} else {
-		pr_err_ratelimited("Can't stores handles increase slab_owner_handle_size\n");
-	}
-	return false;
-}
-
-/* Calculate hash for a stack */
-static u32 hash_stack(unsigned long *entries, unsigned int size)
-{
-	return jhash2((u32 *)entries,
-			       size * sizeof(unsigned long) / sizeof(u32),
-			       STACK_HASH_SEED);
-}
-
-static ssize_t dump_tracking(char *buf, size_t size, struct kmem_cache *s,
-			void *object)
-{
-	struct track *t;
-	int ret;
-	u32 handle, nr_entries;
-
-	if (!(s->flags & SLAB_STORE_USER))
-		return 0;
-
-	t = get_track(s, object, TRACK_ALLOC);
-	if (!t->addr)
-		return 0;
-
-#ifdef CONFIG_STACKTRACE
-	{
-		int i;
-
-		for (i = 0; i < TRACK_ADDRS_COUNT; i++)
-			if (t->addrs[i])
-				continue;
-			else
-				break;
-		nr_entries = i;
-		handle = hash_stack(t->addrs, nr_entries);
-
-		if ((buf > (md_slabowner_dump_addr +
-			md_slabowner_dump_size - slab_owner_handles_size))
-			|| !find_stack(handle, md_slabowner_dump_addr, buf)) {
-
-			ret = scnprintf(buf, size, "%p %u %u\n",
-				object, handle, nr_entries);
-			if (ret == size)
-				goto err;
-
-			for (i = 0; i < nr_entries; i++) {
-				ret += scnprintf(buf + ret, size - ret,
-						"%p\n", (void *)t->addrs[i]);
-				if (ret == size)
-					goto err;
-			}
-		} else {
-			ret = scnprintf(buf, size, "%p %u %u\n",
-					object, handle, 0);
-		}
-	}
-#else
-	ret = scnprintf(buf, size, "%p %p\n", object, (void *)t->addr);
-
-#endif
-err:
-	return ret;
-}
-
-void md_dump_slabowner(void)
-{
-	struct kmem_cache *s;
-	int node;
-	char *buf = md_slabowner_dump_addr;
-	struct kmem_cache_node *n;
-	void *addr;
-	void *p;
-	ssize_t ret, size = md_slabowner_dump_size;
-	int i;
-
-	for (i = 0; i <= KMALLOC_SHIFT_HIGH; i++) {
-		if (!test_bit(i, &slab_owner_filter))
-			continue;
-		s = kmalloc_caches[KMALLOC_NORMAL][i];
-		if (!s)
-			continue;
-		ret = scnprintf(buf, size, "%s\n", s->name);
-		if (ret == size)
-			return;
-		buf += ret;
-		size -= ret;
-		for_each_kmem_cache_node(s, node, n) {
-			unsigned long flags;
-			struct page *page;
-
-			if (!atomic_long_read(&n->nr_slabs))
-				continue;
-
-			spin_lock_irqsave(&n->list_lock, flags);
-
-			list_for_each_entry(page, &n->partial, lru) {
-				addr = page_address(page);
-				slab_lock(page);
-				for_each_object(p, s, addr, page->objects) {
-					ret  = dump_tracking(buf, size, s, p);
-					if (ret == size) {
-						pr_err("slabowner minidump region exhausted\n");
-						return;
-					}
-					buf += ret;
-					size -= ret;
-				}
-				slab_unlock(page);
-			}
-			list_for_each_entry(page, &n->full, lru) {
-				addr = page_address(page);
-				slab_lock(page);
-				for_each_object(p, s, addr, page->objects) {
-					ret  = dump_tracking(buf, size, s, p);
-					if (ret == size) {
-						pr_err("slabowner minidump region exhausted\n");
-						return;
-					}
-					buf += ret;
-					size -= ret;
-				}
-				slab_unlock(page);
-			}
-			spin_unlock_irqrestore(&n->list_lock, flags);
-		}
-		ret = scnprintf(buf, size, "\n");
-		if (ret == size)
-			return;
-		buf += ret;
-		size -= ret;
-	}
-}
-#endif /* CONFIG_QCOM_MINIDUMP_PANIC_DUMP */
 #endif	/* CONFIG_SLUB_DEBUG */
 
 #ifdef SLUB_RESILIENCY_TEST
@@ -5256,7 +5037,6 @@ static ssize_t order_store(struct kmem_cache *s,
 		return -EINVAL;
 
 	calculate_sizes(s, order);
-	reinit_cache_random_seq(s);
 	return length;
 }
 
@@ -5494,7 +5274,6 @@ static ssize_t red_zone_store(struct kmem_cache *s,
 		s->flags |= SLAB_RED_ZONE;
 	}
 	calculate_sizes(s, -1);
-	reinit_cache_random_seq(s);
 	return length;
 }
 SLAB_ATTR(red_zone);
@@ -5515,7 +5294,6 @@ static ssize_t poison_store(struct kmem_cache *s,
 		s->flags |= SLAB_POISON;
 	}
 	calculate_sizes(s, -1);
-	reinit_cache_random_seq(s);
 	return length;
 }
 SLAB_ATTR(poison);
@@ -5537,7 +5315,6 @@ static ssize_t store_user_store(struct kmem_cache *s,
 		s->flags |= SLAB_STORE_USER;
 	}
 	calculate_sizes(s, -1);
-	reinit_cache_random_seq(s);
 	return length;
 }
 SLAB_ATTR(store_user);
@@ -6130,94 +5907,6 @@ struct saved_alias {
 
 static struct saved_alias *alias_list;
 
-#ifdef CONFIG_SLUB_DEBUG
-static struct dentry *slab_debugfs_top;
-
-static int alloc_trace_locations(struct seq_file *seq, struct kmem_cache *s,
-			enum track_item alloc)
-{
-	unsigned long i;
-	struct loc_track t = { 0, 0, NULL };
-	int node;
-	unsigned long *map = kmalloc(BITS_TO_LONGS(oo_objects(s->max)) *
-			sizeof(unsigned long), GFP_KERNEL);
-	struct kmem_cache_node *n;
-
-	if (!map || !alloc_loc_track(&t, PAGE_SIZE / sizeof(struct location),
-			GFP_KERNEL)) {
-		kfree(map);
-		return -ENOMEM;
-	}
-	/* Push back cpu slabs */
-	flush_all(s);
-
-	for_each_kmem_cache_node(s, node, n) {
-		unsigned long flags;
-		struct page *page;
-
-		if (!atomic_long_read(&n->nr_slabs))
-			continue;
-
-		spin_lock_irqsave(&n->list_lock, flags);
-		list_for_each_entry(page, &n->partial, lru)
-			process_slab(&t, s, page, alloc);
-		list_for_each_entry(page, &n->full, lru)
-			process_slab(&t, s, page, alloc);
-		spin_unlock_irqrestore(&n->list_lock, flags);
-	}
-
-	for (i = 0; i < t.count; i++) {
-		struct location *l = &t.loc[i];
-		unsigned int j = 0;
-
-		seq_printf(seq,
-		"alloc_list: call_site=%pS count=%zu object_size=%zu slab_size=%zu slab_name=%s\n",
-			(void *)l->addr, l->count, s->object_size, s->size, s->name);
-#ifdef CONFIG_STACKTRACE
-		for (j = 0; j < TRACK_ADDRS_COUNT; j++)
-			if (l->addrs[j]) {
-				seq_printf(seq, "%pS\n", l->addrs[j]);
-				continue;
-			} else
-				break;
-#endif
-	}
-
-	free_loc_track(&t);
-	kfree(map);
-	return 0;
-}
-
-static int slab_debug_alloc_trace(struct seq_file *seq,
-					void *ignored)
-{
-
-	struct kmem_cache *slab;
-
-	list_for_each_entry(slab, &slab_caches, list) {
-		if (!(slab->flags & SLAB_STORE_USER))
-			continue;
-		alloc_trace_locations(seq, slab, TRACK_ALLOC);
-	}
-
-	return 0;
-}
-
-static int slab_debug_alloc_trace_open(struct inode *inode,
-					struct file *file)
-{
-	return single_open(file, slab_debug_alloc_trace,
-					inode->i_private);
-}
-
-static const struct file_operations slab_debug_alloc_fops = {
-	.open    = slab_debug_alloc_trace_open,
-	.read    = seq_read,
-	.llseek  = seq_lseek,
-	.release = single_release,
-};
-#endif
-
 static int sysfs_slab_alias(struct kmem_cache *s, const char *name)
 {
 	struct saved_alias *al;
@@ -6240,91 +5929,6 @@ static int sysfs_slab_alias(struct kmem_cache *s, const char *name)
 	alias_list = al;
 	return 0;
 }
-
-#ifdef CONFIG_SLUB_DEBUG
-#ifdef CONFIG_QCOM_MINIDUMP_PANIC_DUMP
-static ssize_t slab_owner_filter_write(struct file *file,
-					  const char __user *ubuf,
-					  size_t count, loff_t *offset)
-{
-	unsigned long filter;
-	int bit, i;
-	struct kmem_cache *s;
-
-	if (kstrtoul_from_user(ubuf, count, 0, &filter)) {
-		pr_err_ratelimited("Invalid format for filter\n");
-		return -EINVAL;
-	}
-
-	for (i = 0, bit = 1; filter >= bit; bit *= 2, i++) {
-		if (filter & bit) {
-			s = kmalloc_caches[KMALLOC_NORMAL][i];
-			if (!s) {
-				pr_err("Invalid filter : %lx kmalloc-%d doesn't exist\n",
-						filter, bit);
-				return -EINVAL;
-			}
-		}
-	}
-	slab_owner_filter = filter;
-	return count;
-}
-
-static ssize_t slab_owner_filter_read(struct file *file, char __user *ubuf,
-				       size_t count, loff_t *offset)
-{
-	char buf[64];
-
-	snprintf(buf, sizeof(buf), "0x%lx\n", slab_owner_filter);
-	return simple_read_from_buffer(ubuf, count, offset, buf, strlen(buf));
-}
-
-static const struct file_operations proc_slab_owner_filter_ops = {
-	.open	= simple_open,
-	.write	= slab_owner_filter_write,
-	.read	= slab_owner_filter_read,
-};
-
-static ssize_t slab_owner_handle_write(struct file *file,
-					  const char __user *ubuf,
-					  size_t count, loff_t *offset)
-{
-	unsigned long size;
-
-	if (kstrtoul_from_user(ubuf, count, 0, &size)) {
-		pr_err_ratelimited("Invalid format for handle size\n");
-		return -EINVAL;
-	}
-
-	if (size) {
-		if (size > (md_slabowner_dump_size / SZ_16K)) {
-			pr_err_ratelimited("size : %lu KB exceeds max size : %lu KB\n",
-				size, (md_slabowner_dump_size / SZ_16K));
-			goto err;
-		}
-		slab_owner_handles_size = size * SZ_1K;
-	}
-err:
-	return count;
-}
-
-static ssize_t slab_owner_handle_read(struct file *file, char __user *ubuf,
-				       size_t count, loff_t *offset)
-{
-	char buf[64];
-
-	snprintf(buf, sizeof(buf), "%lu KB\n",
-			(slab_owner_handles_size / SZ_1K));
-	return simple_read_from_buffer(ubuf, count, offset, buf, strlen(buf));
-}
-
-static const struct file_operations proc_slab_owner_handle_ops = {
-	.open	= simple_open,
-	.write	= slab_owner_handle_write,
-	.read	= slab_owner_handle_read,
-};
-#endif /* CONFIG_QCOM_MINIDUMP_PANIC_DUMP */
-#endif /* CONFIG_SLUB_DEBUG */
 
 static int __init slab_sysfs_init(void)
 {
@@ -6349,15 +5953,6 @@ static int __init slab_sysfs_init(void)
 			       s->name);
 	}
 
-#ifdef CONFIG_SLUB_DEBUG
-	if (slub_debug) {
-		slab_debugfs_top = debugfs_create_dir("slab", NULL);
-		if (!IS_ERR(slab_debugfs_top))
-			debugfs_create_file("alloc_trace", 0400, slab_debugfs_top,
-					NULL, &slab_debug_alloc_fops);
-	}
-#endif
-
 	while (alias_list) {
 		struct saved_alias *al = alias_list;
 
@@ -6369,23 +5964,6 @@ static int __init slab_sysfs_init(void)
 		kfree(al);
 	}
 
-#ifdef CONFIG_SLUB_DEBUG
-#ifdef CONFIG_QCOM_MINIDUMP_PANIC_DUMP
-	if (slub_debug) {
-		int i;
-
-		debugfs_create_file("slab_owner_filter", 0400, NULL, NULL,
-			    &proc_slab_owner_filter_ops);
-		debugfs_create_file("slab_owner_handles_size_kb", 0400,
-				NULL, NULL, &proc_slab_owner_handle_ops);
-
-		for (i = 0; i <= KMALLOC_SHIFT_HIGH; i++) {
-			if (kmalloc_caches[KMALLOC_NORMAL][i])
-				set_bit(i, &slab_owner_filter);
-		}
-	}
-#endif
-#endif
 	mutex_unlock(&slab_mutex);
 	resiliency_test();
 	return 0;

@@ -446,7 +446,7 @@ void kernfs_put_active(struct kernfs_node *kn)
 		return;
 
 	if (kernfs_lockdep(kn))
-		rwsem_release(&kn->dep_map, _RET_IP_);
+		rwsem_release(&kn->dep_map, 1, _RET_IP_);
 	v = atomic_dec_return(&kn->active);
 	if (likely(v != KN_DEACTIVATED_BIAS))
 		return;
@@ -484,7 +484,7 @@ static void kernfs_drain(struct kernfs_node *kn)
 
 	if (kernfs_lockdep(kn)) {
 		lock_acquired(&kn->dep_map, _RET_IP_);
-		rwsem_release(&kn->dep_map, _RET_IP_);
+		rwsem_release(&kn->dep_map, 1, _RET_IP_);
 	}
 
 	kernfs_drain_open_files(kn);
@@ -701,6 +701,18 @@ struct kernfs_node *kernfs_new_node(struct kernfs_node *parent,
 				    unsigned flags)
 {
 	struct kernfs_node *kn;
+
+	if (parent->mode & S_ISGID) {
+		/* this code block imitates inode_init_owner() for
+		 * kernfs
+		 */
+
+		if (parent->iattr)
+			gid = parent->iattr->ia_gid;
+
+		if (flags & KERNFS_DIR)
+			mode |= S_ISGID;
+	}
 
 	kn = __kernfs_new_node(kernfs_root(parent), parent,
 			       name, mode, uid, gid, flags);

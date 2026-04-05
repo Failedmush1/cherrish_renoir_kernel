@@ -1313,10 +1313,7 @@ static void f2fs_put_super(struct super_block *sb)
 	for (i = 0; i < NR_PAGE_TYPE; i++)
 		kvfree(sbi->write_io[i]);
 #ifdef CONFIG_UNICODE
-	if (sb->s_encoding) {
-		utf8_unload(sb->s_encoding);
-		sb->s_encoding = NULL;
-	}
+	utf8_unload(sb->s_encoding);
 #endif
 	kvfree(sbi);
 }
@@ -1462,9 +1459,9 @@ static int f2fs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	buf->f_fsid.val[1] = (u32)(id >> 32);
 
 #ifdef CONFIG_QUOTA
-	if (is_inode_flag_set(dentry->d_inode, FI_PROJ_INHERIT) &&
+	if (is_inode_flag_set(d_inode(dentry), FI_PROJ_INHERIT) &&
 			sb_has_quota_limits_enabled(sb, PRJQUOTA)) {
-		f2fs_statfs_project(sb, F2FS_I(dentry->d_inode)->i_projid, buf);
+		f2fs_statfs_project(sb, F2FS_I(d_inode(dentry))->i_projid, buf);
 	}
 #endif
 	return 0;
@@ -2708,9 +2705,9 @@ static inline bool sanity_check_area_boundary(struct f2fs_sb_info *sbi,
 	u32 segment_count = le32_to_cpu(raw_super->segment_count);
 	u32 log_blocks_per_seg = le32_to_cpu(raw_super->log_blocks_per_seg);
 	u64 main_end_blkaddr = main_blkaddr +
-				(segment_count_main << log_blocks_per_seg);
+				((u64)segment_count_main << log_blocks_per_seg);
 	u64 seg_end_blkaddr = segment0_blkaddr +
-				(segment_count << log_blocks_per_seg);
+				((u64)segment_count << log_blocks_per_seg);
 
 	if (segment0_blkaddr != cp_blkaddr) {
 		f2fs_info(sbi, "Mismatch start address, segment0(%u) cp_blkaddr(%u)",
@@ -3579,7 +3576,7 @@ try_onemore:
 	sbi->valid_super_block = valid_super_block;
 	init_rwsem(&sbi->gc_lock);
 	mutex_init(&sbi->writepages);
-	init_rwsem(&sbi->cp_global_sem);
+	mutex_init(&sbi->cp_mutex);
 	init_rwsem(&sbi->node_write);
 	init_rwsem(&sbi->node_change);
 
@@ -3936,10 +3933,8 @@ free_bio_info:
 		kvfree(sbi->write_io[i]);
 
 #ifdef CONFIG_UNICODE
-	if (sb->s_encoding) {
-		utf8_unload(sb->s_encoding);
-		sb->s_encoding = NULL;
-	}
+	utf8_unload(sb->s_encoding);
+	sb->s_encoding = NULL;
 #endif
 free_options:
 #ifdef CONFIG_QUOTA

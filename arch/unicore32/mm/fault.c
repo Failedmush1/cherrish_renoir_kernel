@@ -202,7 +202,7 @@ static int do_pf(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 	struct mm_struct *mm;
 	int sig, code;
 	vm_fault_t fault;
-	unsigned int flags = FAULT_FLAG_DEFAULT;
+	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
 
 	tsk = current;
 	mm = tsk->mm;
@@ -224,12 +224,12 @@ static int do_pf(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 	 * validly references user space from well defined areas of the code,
 	 * we can bug out early if this is from code which shouldn't.
 	 */
-	if (!mmap_read_trylock(mm)) {
+	if (!down_read_trylock(&mm->mmap_sem)) {
 		if (!user_mode(regs)
 		    && !search_exception_tables(regs->UCreg_pc))
 			goto no_context;
 retry:
-		mmap_read_lock(mm);
+		down_read(&mm->mmap_sem);
 	} else {
 		/*
 		 * The above down_read_trylock() might have succeeded in
@@ -250,7 +250,7 @@ retry:
 	 * signal first. We do not need to release the mmap_sem because
 	 * it would already be released in __lock_page_or_retry in
 	 * mm/filemap.c. */
-	if (fault_signal_pending(fault, regs))
+	if ((fault & VM_FAULT_RETRY) && fatal_signal_pending(current))
 		return 0;
 
 	if (!(fault & VM_FAULT_ERROR) && (flags & FAULT_FLAG_ALLOW_RETRY)) {
@@ -259,12 +259,14 @@ retry:
 		else
 			tsk->min_flt++;
 		if (fault & VM_FAULT_RETRY) {
-			flags |= FAULT_FLAG_TRIED;
+			/* Clear FAULT_FLAG_ALLOW_RETRY to avoid any risk
+			* of starvation. */
+			flags &= ~FAULT_FLAG_ALLOW_RETRY;
 			goto retry;
 		}
 	}
 
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 
 	/*
 	 * Handle the "normal" case first - VM_FAULT_MAJOR

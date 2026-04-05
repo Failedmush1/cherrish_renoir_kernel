@@ -44,14 +44,10 @@ int f2fs_check_nid_range(struct f2fs_sb_info *sbi, nid_t nid)
 bool f2fs_available_free_memory(struct f2fs_sb_info *sbi, int type)
 {
 	struct f2fs_nm_info *nm_i = NM_I(sbi);
-	struct discard_cmd_control *dcc = SM_I(sbi)->dcc_info;
 	struct sysinfo val;
 	unsigned long avail_ram;
 	unsigned long mem_size = 0;
 	bool res = false;
-
-	if (!nm_i)
-		return true;
 
 	si_meminfo(&val);
 
@@ -94,10 +90,6 @@ bool f2fs_available_free_memory(struct f2fs_sb_info *sbi, int type)
 		/* it allows 20% / total_ram for inmemory pages */
 		mem_size = get_pages(sbi, F2FS_INMEM_PAGES);
 		res = mem_size < (val.totalram / 5);
-	} else if (type == DISCARD_CACHE) {
-		mem_size = (atomic_read(&dcc->discard_cmd_cnt) *
-				sizeof(struct discard_cmd)) >> PAGE_SHIFT;
-		res = mem_size < (avail_ram * nm_i->ram_thresh / 100);
 	} else {
 		if (!sbi->sb->s_bdi->wb.dirty_exceeded)
 			return true;
@@ -538,7 +530,7 @@ int f2fs_get_node_info(struct f2fs_sb_info *sbi, nid_t nid,
 	int i;
 
 	ni->nid = nid;
-retry:
+
 	/* Check nat cache */
 	down_read(&nm_i->nat_tree_lock);
 	e = __lookup_nat_cache(nm_i, nid);
@@ -550,19 +542,10 @@ retry:
 		return 0;
 	}
 
-	/*
-	 * Check current segment summary by trying to grab journal_rwsem first.
-	 * This sem is on the critical path on the checkpoint requiring the above
-	 * nat_tree_lock. Therefore, we should retry, if we failed to grab here
-	 * while not bothering checkpoint.
-	 */
-	if (!rwsem_is_locked(&sbi->cp_global_sem)) {
-		down_read(&curseg->journal_rwsem);
-	} else if (!down_read_trylock(&curseg->journal_rwsem)) {
-		up_read(&nm_i->nat_tree_lock);
-		goto retry;
-	}
+	memset(&ne, 0, sizeof(struct f2fs_nat_entry));
 
+	/* Check current segment summary */
+	down_read(&curseg->journal_rwsem);
 	i = f2fs_lookup_journal_in_cursum(journal, NAT_JOURNAL, nid, 0);
 	if (i >= 0) {
 		ne = nat_in_journal(journal, i);
@@ -776,6 +759,16 @@ int f2fs_get_dnode_of_data(struct dnode_of_data *dn, pgoff_t index, int mode)
 	/* get indirect or direct nodes */
 	for (i = 1; i <= level; i++) {
 		bool done = false;
+
+		if (nids[i] && nids[i] == dn->inode->i_ino) {
+			err = -EFSCORRUPTED;
+			f2fs_err(sbi,
+				"inode mapping table is corrupted, run fsck to fix it, "
+				"ino:%lu, nid:%u, level:%d, offset:%d",
+				dn->inode->i_ino, nids[i], level, offset[level]);
+			set_sbi_flag(sbi, SBI_NEED_FSCK);
+			goto release_pages;
+		}
 
 		if (!nids[i] && mode == ALLOC_NODE) {
 			/* alloc new node */
@@ -1257,6 +1250,7 @@ struct page *f2fs_new_node_page(struct dnode_of_data *dn, unsigned int ofs)
 	}
 	if (unlikely(new_ni.blk_addr != NULL_ADDR)) {
 		err = -EFSCORRUPTED;
+		dec_valid_node_count(sbi, dn->inode, !ofs);
 		set_sbi_flag(sbi, SBI_NEED_FSCK);
 		goto fail;
 	}
@@ -1282,7 +1276,6 @@ struct page *f2fs_new_node_page(struct dnode_of_data *dn, unsigned int ofs)
 	if (ofs == 0)
 		inc_valid_inode_count(sbi);
 	return page;
-
 fail:
 	clear_node_page_dirty(page);
 	f2fs_put_page(page, 1);
@@ -1952,12 +1945,8 @@ continue_unlock:
 				goto continue_unlock;
 			}
 
-			/* flush inline_data/inode, if it's async context. */
-			if (!do_balance)
-				goto write_node;
-
-			/* flush inline_data */
-			if (is_inline_node(page)) {
+			/* flush inline_data, if it's async context. */
+			if (do_balance && is_inline_node(page)) {
 				clear_inline_node(page);
 				unlock_page(page);
 				flush_inline_data(sbi, ino_of_node(page));
@@ -1970,7 +1959,7 @@ continue_unlock:
 				if (flush_dirty_inode(page))
 					goto lock_node;
 			}
-write_node:
+
 			f2fs_wait_on_page_writeback(page, NODE, true, true);
 
 			if (!clear_page_dirty_for_io(page))

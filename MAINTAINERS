@@ -4584,18 +4584,6 @@ F:	net/ax25/ax25_out.c
 F:	net/ax25/ax25_timer.c
 F:	net/ax25/sysctl_net_ax25.c
 
-DATA ACCESS MONITOR
-M:	SeongJae Park <sjpark@amazon.de>
-L:	linux-mm@kvack.org
-S:	Maintained
-F:	Documentation/ABI/testing/sysfs-kernel-mm-damon
-F:	Documentation/admin-guide/mm/damon/
-F:	Documentation/vm/damon/
-F:	include/linux/damon.h
-F:	include/trace/events/damon.h
-F:	mm/damon/
-F:	tools/testing/selftests/damon/
-
 DAVICOM FAST ETHERNET (DMFE) NETWORK DRIVER
 L:	netdev@vger.kernel.org
 S:	Orphan
@@ -6162,6 +6150,11 @@ F:	include/linux/platform_data/mdio-gpio.h
 F:	include/trace/events/mdio.h
 F:	include/uapi/linux/mdio.h
 F:	include/uapi/linux/mii.h
+
+EXFAT FILE SYSTEM
+M:	Valdis Kletnieks <valdis.kletnieks@vt.edu>
+S:	Maintained
+F:	drivers/staging/exfat/
 
 EXT2 FILE SYSTEM
 M:	Jan Kara <jack@suse.com>
@@ -10831,6 +10824,15 @@ M:	Microchip Linux Driver Support <UNGLinuxDriver@microchip.com>
 L:	netdev@vger.kernel.org
 S:	Supported
 F:	drivers/net/ethernet/mscc/
+
+MICROSOFT SURFACE HARDWARE PLATFORM SUPPORT
+M:	Hans de Goede <hdegoede@redhat.com>
+M:	Mark Gross <mgross@linux.intel.com>
+M:	Maximilian Luz <luzmaximilian@gmail.com>
+L:	platform-driver-x86@vger.kernel.org
+S:	Maintained
+T:	git git://git.kernel.org/pub/scm/linux/kernel/git/pdx86/platform-drivers-x86.git
+F:	drivers/platform/surface/
 
 MICROSOFT SURFACE PRO 3 BUTTON DRIVER
 M:	Chen Yu <yu.c.chen@intel.com>

@@ -71,7 +71,7 @@ int do_page_fault(struct pt_regs *regs, unsigned long address,
 	struct mm_struct *mm = current->mm;
 	struct vm_area_struct * vma;
 	vm_fault_t fault;
-	unsigned int flags = FAULT_FLAG_DEFAULT;
+	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
 
 	pr_debug("do page fault:\nregs->sr=%#x, regs->pc=%#lx, address=%#lx, %ld, %p\n",
 		regs->sr, regs->pc, address, error_code, mm ? mm->pgd : NULL);
@@ -86,7 +86,7 @@ int do_page_fault(struct pt_regs *regs, unsigned long address,
 	if (user_mode(regs))
 		flags |= FAULT_FLAG_USER;
 retry:
-	mmap_read_lock(mm);
+	down_read(&mm->mmap_sem);
 
 	vma = find_vma(mm, address);
 	if (!vma)
@@ -138,7 +138,7 @@ good_area:
 	fault = handle_mm_fault(vma, address, flags);
 	pr_debug("handle_mm_fault returns %x\n", fault);
 
-	if (fault_signal_pending(fault, regs))
+	if ((fault & VM_FAULT_RETRY) && fatal_signal_pending(current))
 		return 0;
 
 	if (unlikely(fault & VM_FAULT_ERROR)) {
@@ -162,6 +162,9 @@ good_area:
 		else
 			current->min_flt++;
 		if (fault & VM_FAULT_RETRY) {
+			/* Clear FAULT_FLAG_ALLOW_RETRY to avoid any risk
+			 * of starvation. */
+			flags &= ~FAULT_FLAG_ALLOW_RETRY;
 			flags |= FAULT_FLAG_TRIED;
 
 			/*
@@ -174,7 +177,7 @@ good_area:
 		}
 	}
 
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 	return 0;
 
 /*
@@ -182,7 +185,7 @@ good_area:
  * us unable to handle the page fault gracefully.
  */
 out_of_memory:
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 	if (!user_mode(regs))
 		goto no_context;
 	pagefault_out_of_memory();
@@ -211,6 +214,6 @@ acc_err:
 	current->thread.faddr = address;
 
 send_sig:
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 	return send_fault_sig(regs);
 }

@@ -743,33 +743,8 @@ no_context(struct pt_regs *regs, unsigned long error_code,
 	}
 
 	/* Are we prepared to handle this kernel fault? */
-	if (fixup_exception(regs, X86_TRAP_PF, error_code, address)) {
-		/*
-		 * Any interrupt that takes a fault gets the fixup. This makes
-		 * the below recursive fault logic only apply to a faults from
-		 * task context.
-		 */
-		if (in_interrupt())
-			return;
-
-		/*
-		 * Per the above we're !in_interrupt(), aka. task context.
-		 *
-		 * In this case we need to make sure we're not recursively
-		 * faulting through the emulate_vsyscall() logic.
-		 */
-		if (current->thread.sig_on_uaccess_err && signal) {
-			set_signal_archinfo(address, error_code);
-
-			/* XXX: hwpoison faults will set the wrong code. */
-			force_sig_fault(signal, si_code, (void __user *)address);
-		}
-
-		/*
-		 * Barring that, we can do the fixup and be happy.
-		 */
+	if (fixup_exception(regs, X86_TRAP_PF, error_code, address))
 		return;
-	}
 
 #ifdef CONFIG_VMAP_STACK
 	/*
@@ -950,7 +925,7 @@ __bad_area(struct pt_regs *regs, unsigned long error_code,
 	 * Something tried to access memory that isn't in our memory map..
 	 * Fix it, but check if it's kernel or user first..
 	 */
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 
 	__bad_area_nosemaphore(regs, error_code, address, pkey, si_code);
 }
@@ -1309,7 +1284,7 @@ void do_user_addr_fault(struct pt_regs *regs,
 	struct task_struct *tsk;
 	struct mm_struct *mm;
 	vm_fault_t fault, major = 0;
-	unsigned int flags = FAULT_FLAG_DEFAULT;
+	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
 
 	tsk = current;
 	mm = tsk->mm;
@@ -1401,7 +1376,7 @@ void do_user_addr_fault(struct pt_regs *regs,
 	 * 1. Failed to acquire mmap_sem, and
 	 * 2. The access did not originate in userspace.
 	 */
-	if (unlikely(!mmap_read_trylock(mm))) {
+	if (unlikely(!down_read_trylock(&mm->mmap_sem))) {
 		if (!user_mode(regs) && !search_exception_tables(regs->ip)) {
 			/*
 			 * Fault from code in kernel from
@@ -1411,7 +1386,7 @@ void do_user_addr_fault(struct pt_regs *regs,
 			return;
 		}
 retry:
-		mmap_read_lock(mm);
+		down_read(&mm->mmap_sem);
 	} else {
 		/*
 		 * The above down_read_trylock() might have succeeded in
@@ -1463,26 +1438,30 @@ good_area:
 	fault = handle_mm_fault(vma, address, flags);
 	major |= fault & VM_FAULT_MAJOR;
 
-	/* Quick path to respond to signals */
-	if (fault_signal_pending(fault, regs)) {
-		if (!user_mode(regs))
-			no_context(regs, hw_error_code, address, SIGBUS,
-				   BUS_ADRERR);
-		return;
-	}
-
 	/*
 	 * If we need to retry the mmap_sem has already been released,
 	 * and if there is a fatal signal pending there is no guarantee
 	 * that we made any progress. Handle this case first.
 	 */
-	if (unlikely((fault & VM_FAULT_RETRY) &&
-		     (flags & FAULT_FLAG_ALLOW_RETRY))) {
-		flags |= FAULT_FLAG_TRIED;
-		goto retry;
+	if (unlikely(fault & VM_FAULT_RETRY)) {
+		/* Retry at most once */
+		if (flags & FAULT_FLAG_ALLOW_RETRY) {
+			flags &= ~FAULT_FLAG_ALLOW_RETRY;
+			flags |= FAULT_FLAG_TRIED;
+			if (!fatal_signal_pending(tsk))
+				goto retry;
+		}
+
+		/* User mode? Just return to handle the fatal exception */
+		if (flags & FAULT_FLAG_USER)
+			return;
+
+		/* Not returning to user mode? Handle exceptions or die: */
+		no_context(regs, hw_error_code, address, SIGBUS, BUS_ADRERR);
+		return;
 	}
 
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 	if (unlikely(fault & VM_FAULT_ERROR)) {
 		mm_fault_error(regs, hw_error_code, address, fault);
 		return;
@@ -1512,7 +1491,7 @@ static noinline void
 __do_page_fault(struct pt_regs *regs, unsigned long hw_error_code,
 		unsigned long address)
 {
-	prefetchw(&current->mm->mmap_lock);
+	prefetchw(&current->mm->mmap_sem);
 
 	if (unlikely(kmmio_fault(regs, address)))
 		return;

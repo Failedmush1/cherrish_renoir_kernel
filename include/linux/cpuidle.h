@@ -35,9 +35,6 @@ struct cpuidle_state_usage {
 	unsigned long long	time; /* in US */
 	unsigned long long	above; /* Number of times it's been too deep */
 	unsigned long long	below; /* Number of times it's been too shallow */
-#ifdef CONFIG_QGKI_CPUIDLE_FAILED_STAT
-	unsigned long long	failed; /* Number of times it failed to enter */
-#endif
 #ifdef CONFIG_SUSPEND
 	unsigned long long	s2idle_usage;
 	unsigned long long	s2idle_time; /* in US */
@@ -227,7 +224,7 @@ static inline void cpuidle_use_deepest_state(bool enable)
 #endif
 
 /* kernel/sched/idle.c */
-extern void sched_idle_set_state(struct cpuidle_state *idle_state, int index);
+extern void sched_idle_set_state(struct cpuidle_state *idle_state);
 extern void default_idle_call(void);
 
 #ifdef CONFIG_ARCH_NEEDS_CPU_IDLE_COUPLED

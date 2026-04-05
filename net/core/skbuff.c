@@ -1527,11 +1527,17 @@ static inline int skb_alloc_rx_flag(const struct sk_buff *skb)
 
 struct sk_buff *skb_copy(const struct sk_buff *skb, gfp_t gfp_mask)
 {
-	int headerlen = skb_headroom(skb);
-	unsigned int size = skb_end_offset(skb) + skb->data_len;
-	struct sk_buff *n = __alloc_skb(size, gfp_mask,
-					skb_alloc_rx_flag(skb), NUMA_NO_NODE);
+	struct sk_buff *n;
+	unsigned int size;
+	int headerlen;
 
+	if (WARN_ON_ONCE(skb_shinfo(skb)->gso_type & SKB_GSO_FRAGLIST))
+		return NULL;
+
+	headerlen = skb_headroom(skb);
+	size = skb_end_offset(skb) + skb->data_len;
+	n = __alloc_skb(size, gfp_mask,
+			skb_alloc_rx_flag(skb), NUMA_NO_NODE);
 	if (!n)
 		return NULL;
 
@@ -1737,6 +1743,48 @@ struct sk_buff *skb_realloc_headroom(struct sk_buff *skb, unsigned int headroom)
 EXPORT_SYMBOL(skb_realloc_headroom);
 
 /**
+ *	skb_expand_head - reallocate header of &sk_buff
+ *	@skb: buffer to reallocate
+ *	@headroom: needed headroom
+ *
+ *	Unlike skb_realloc_headroom, this one does not allocate a new skb
+ *	if possible; copies skb->sk to new skb as needed
+ *	and frees original skb in case of failures.
+ *
+ *	It expect increased headroom and generates warning otherwise.
+ */
+
+struct sk_buff *skb_expand_head(struct sk_buff *skb, unsigned int headroom)
+{
+	int delta = headroom - skb_headroom(skb);
+
+	if (WARN_ONCE(delta <= 0,
+		      "%s is expecting an increase in the headroom", __func__))
+		return skb;
+
+	/* pskb_expand_head() might crash, if skb is shared */
+	if (skb_shared(skb)) {
+		struct sk_buff *nskb = skb_clone(skb, GFP_ATOMIC);
+
+		if (likely(nskb)) {
+			if (skb->sk)
+				skb_set_owner_w(nskb, skb->sk);
+			consume_skb(skb);
+		} else {
+			kfree_skb(skb);
+		}
+		skb = nskb;
+	}
+	if (skb &&
+	    pskb_expand_head(skb, SKB_DATA_ALIGN(delta), 0, GFP_ATOMIC)) {
+		kfree_skb(skb);
+		skb = NULL;
+	}
+	return skb;
+}
+EXPORT_SYMBOL(skb_expand_head);
+
+/**
  *	skb_copy_expand	-	copy and expand sk_buff
  *	@skb: buffer to copy
  *	@newheadroom: new free bytes at head
@@ -1761,12 +1809,17 @@ struct sk_buff *skb_copy_expand(const struct sk_buff *skb,
 	/*
 	 *	Allocate the copy buffer
 	 */
-	struct sk_buff *n = __alloc_skb(newheadroom + skb->len + newtailroom,
-					gfp_mask, skb_alloc_rx_flag(skb),
-					NUMA_NO_NODE);
-	int oldheadroom = skb_headroom(skb);
 	int head_copy_len, head_copy_off;
+	struct sk_buff *n;
+	int oldheadroom;
 
+	if (WARN_ON_ONCE(skb_shinfo(skb)->gso_type & SKB_GSO_FRAGLIST))
+		return NULL;
+
+	oldheadroom = skb_headroom(skb);
+	n = __alloc_skb(newheadroom + skb->len + newtailroom,
+			gfp_mask, skb_alloc_rx_flag(skb),
+			NUMA_NO_NODE);
 	if (!n)
 		return NULL;
 
@@ -3891,8 +3944,9 @@ struct sk_buff *skb_segment(struct sk_buff *head_skb,
 		/* GSO partial only requires that we trim off any excess that
 		 * doesn't fit into an MSS sized block, so take care of that
 		 * now.
+		 * Cap len to not accidentally hit GSO_BY_FRAGS.
 		 */
-		partial_segs = len / mss;
+		partial_segs = min(len, GSO_BY_FRAGS - 1U) / mss;
 		if (partial_segs > 1)
 			mss *= partial_segs;
 		else
@@ -5299,11 +5353,11 @@ void skb_scrub_packet(struct sk_buff *skb, bool xnet)
 	skb->offload_fwd_mark = 0;
 	skb->offload_l3_fwd_mark = 0;
 #endif
+	ipvs_reset(skb);
 
 	if (!xnet)
 		return;
 
-	ipvs_reset(skb);
 	skb->mark = 0;
 	skb->tstamp = 0;
 }
@@ -5629,75 +5683,6 @@ int skb_vlan_push(struct sk_buff *skb, __be16 vlan_proto, u16 vlan_tci)
 	return 0;
 }
 EXPORT_SYMBOL(skb_vlan_push);
-
-#ifdef CONFIG_NET_SCHED_ACT_VLAN_QGKI
-/**
- * skb_eth_pop() - Drop the Ethernet header at the head of a packet
- *
- * @skb: Socket buffer to modify
- *
- * Drop the Ethernet header of @skb.
- *
- * Expects that skb->data points to the mac header and that no VLAN tags are
- * present.
- *
- * Returns 0 on success, -errno otherwise.
- */
-int skb_eth_pop(struct sk_buff *skb)
-{
-	if (!pskb_may_pull(skb, ETH_HLEN) || skb_vlan_tagged(skb) ||
-	    skb_network_offset(skb) < ETH_HLEN)
-		return -EPROTO;
-
-	skb_pull_rcsum(skb, ETH_HLEN);
-	skb_reset_mac_header(skb);
-	skb_reset_mac_len(skb);
-
-	return 0;
-}
-EXPORT_SYMBOL(skb_eth_pop);
-
-/**
- * skb_eth_push() - Add a new Ethernet header at the head of a packet
- *
- * @skb: Socket buffer to modify
- * @dst: Destination MAC address of the new header
- * @src: Source MAC address of the new header
- *
- * Prepend @skb with a new Ethernet header.
- *
- * Expects that skb->data points to the mac header, which must be empty.
- *
- * Returns 0 on success, -errno otherwise.
- */
-int skb_eth_push(struct sk_buff *skb, const unsigned char *dst,
-		 const unsigned char *src)
-{
-	struct ethhdr *eth;
-	int err;
-
-	if (skb_network_offset(skb) || skb_vlan_tag_present(skb))
-		return -EPROTO;
-
-	err = skb_cow_head(skb, sizeof(*eth));
-	if (err < 0)
-		return err;
-
-	skb_push(skb, sizeof(*eth));
-	skb_reset_mac_header(skb);
-	skb_reset_mac_len(skb);
-
-	eth = eth_hdr(skb);
-	ether_addr_copy(eth->h_dest, dst);
-	ether_addr_copy(eth->h_source, src);
-	eth->h_proto = skb->protocol;
-
-	skb_postpush_rcsum(skb, eth, sizeof(*eth));
-
-	return 0;
-}
-EXPORT_SYMBOL(skb_eth_push);
-#endif
 
 /* Update the ethertype of hdr and the skb csum value if required. */
 static void skb_mod_eth_type(struct sk_buff *skb, struct ethhdr *hdr,

@@ -32,7 +32,7 @@ int handle_page_fault(unsigned long address, unsigned long ip,
 	pmd_t *pmd;
 	pte_t *pte;
 	int err = -EFAULT;
-	unsigned int flags = FAULT_FLAG_DEFAULT;
+	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
 
 	*code_out = SEGV_MAPERR;
 
@@ -46,7 +46,7 @@ int handle_page_fault(unsigned long address, unsigned long ip,
 	if (is_user)
 		flags |= FAULT_FLAG_USER;
 retry:
-	mmap_read_lock(mm);
+	down_read(&mm->mmap_sem);
 	vma = find_vma(mm, address);
 	if (!vma)
 		goto out;
@@ -96,6 +96,7 @@ good_area:
 			else
 				current->min_flt++;
 			if (fault & VM_FAULT_RETRY) {
+				flags &= ~FAULT_FLAG_ALLOW_RETRY;
 				flags |= FAULT_FLAG_TRIED;
 
 				goto retry;
@@ -121,7 +122,7 @@ good_area:
 #endif
 	flush_tlb_page(vma, address);
 out:
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 out_nosemaphore:
 	return err;
 
@@ -130,7 +131,7 @@ out_of_memory:
 	 * We ran out of memory, call the OOM killer, and return the userspace
 	 * (which will retry the fault, or kill us if we got oom-killed).
 	 */
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 	if (!is_user)
 		goto out_nosemaphore;
 	pagefault_out_of_memory();

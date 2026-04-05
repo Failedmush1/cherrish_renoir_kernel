@@ -436,10 +436,6 @@
 			embedded devices based on command line input.
 			See Documentation/block/cmdline-partition.rst
 
-	boot_cpus=	[SMP]
-			Rather than attempting to online all possible CPUs at
-			boot time, only online the specified set of CPUs.
-
 	boot_delay=	Milliseconds to delay each printk during boot.
 			Values larger than 10 seconds (10000) are changed to
 			no delay (0).
@@ -488,21 +484,16 @@
 	ccw_timeout_log	[S390]
 			See Documentation/s390/common_io.rst for details.
 
-	cgroup_disable=	[KNL] Disable a particular controller or optional feature
-			Format: {name of the controller(s) or feature(s) to disable}
+	cgroup_disable=	[KNL] Disable a particular controller
+			Format: {name of the controller(s) to disable}
 			The effects of cgroup_disable=foo are:
 			- foo isn't auto-mounted if you mount all cgroups in
 			  a single hierarchy
 			- foo isn't visible as an individually mountable
 			  subsystem
-			- if foo is an optional feature then the feature is
-			  disabled and corresponding cgroup files are not
-			  created
 			{Currently only "memory" controller deal with this and
 			cut the overhead, others just disable the usage. So
 			only cgroup_disable=memory is actually worthy}
-			Specifying "pressure" disables per-cgroup pressure
-			stall information accounting feature
 
 	cgroup_no_v1=	[KNL] Disable cgroup controllers and named hierarchies in v1
 			Format: { { controller | "all" | "named" }
@@ -3827,6 +3818,16 @@
 	printk.time=	Show timing data prefixed to each printk message line
 			Format: <bool>  (1/Y/y=enable, 0/N/n=disable)
 
+	proc_mem.force_override= [KNL]
+			Format: {always | ptrace | never}
+			Traditionally /proc/pid/mem allows memory permissions to be
+			overridden without restrictions. This option may be set to
+			restrict that. Can be one of:
+			- 'always': traditional behavior always allows mem overrides.
+			- 'ptrace': only allow mem overrides for active ptracers.
+			- 'never':  never allow mem overrides.
+			If not specified, default is the CONFIG_PROC_MEM_* choice.
+
 	processor.max_cstate=	[HW,ACPI]
 			Limit processor to maximum C-state
 			max_cstate=9 overrides any DMI blacklist limit.
@@ -4414,6 +4415,9 @@
 
 	rootflags=	[KNL] Set root filesystem mount option string
 
+	initramfs_options= [KNL]
+                        Specify mount options for for the initramfs mount.
+
 	rootfstype=	[KNL] Set root filesystem type
 
 	rootwait	[KNL] Wait (indefinitely) for root device to show up.
@@ -4615,9 +4619,9 @@
 			retpoline,generic - Retpolines
 			retpoline,lfence  - LFENCE; indirect branch
 			retpoline,amd     - alias for retpoline,lfence
-			eibrs		  - enhanced IBRS
-			eibrs,retpoline   - enhanced IBRS + Retpolines
-			eibrs,lfence      - enhanced IBRS + LFENCE
+			eibrs		  - Enhanced/Auto IBRS
+			eibrs,retpoline   - Enhanced/Auto IBRS + Retpolines
+			eibrs,lfence      - Enhanced/Auto IBRS + LFENCE
 			ibrs		  - use IBRS to protect kernel
 
 			Not specifying this option is equivalent to
@@ -5661,9 +5665,3 @@
 				memory, and other data can't be written using
 				xmon commands.
 			off	xmon is disabled.
-
-	eipv4=	[KNL] Sets ipv4 address at boot up for early ethernet.
-
-	eipv6=	[KNL] Sets ipv6 address at boot up for early ethernet.
-
-	ermac=	[KNL] Sets mac address at boot up for early ethernet.

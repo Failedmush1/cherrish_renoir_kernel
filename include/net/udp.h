@@ -27,10 +27,6 @@
 #include <linux/ipv6.h>
 #include <linux/seq_file.h>
 #include <linux/poll.h>
-#ifdef CONFIG_BOARD_XIAOMI
-#include <linux/udp.h>
-#include <linux/bpf-cgroup.h>
-#endif
 
 /**
  *	struct udp_skb_cb  -  UDP(-Lite) private variables
@@ -475,6 +471,16 @@ static inline struct sk_buff *udp_rcv_segment(struct sock *sk,
 {
 	netdev_features_t features = NETIF_F_SG;
 	struct sk_buff *segs;
+	int drop_count;
+
+	/*
+	 * Segmentation in UDP receive path is only for UDP GRO, drop udp
+	 * fragmentation offload (UFO) packets.
+	 */
+	if (skb_shinfo(skb)->gso_type & SKB_GSO_UDP) {
+		drop_count = 1;
+		goto drop;
+	}
 
 	/* Avoid csum recalculation by skb_segment unless userspace explicitly
 	 * asks for the final checksum values
@@ -498,56 +504,18 @@ static inline struct sk_buff *udp_rcv_segment(struct sock *sk,
 	 */
 	segs = __skb_gso_segment(skb, features, false);
 	if (IS_ERR_OR_NULL(segs)) {
-		int segs_nr = skb_shinfo(skb)->gso_segs;
-
-		atomic_add(segs_nr, &sk->sk_drops);
-		SNMP_ADD_STATS(__UDPX_MIB(sk, ipv4), UDP_MIB_INERRORS, segs_nr);
-		kfree_skb(skb);
-		return NULL;
+		drop_count = skb_shinfo(skb)->gso_segs;
+		goto drop;
 	}
 
 	consume_skb(skb);
 	return segs;
+
+drop:
+	atomic_add(drop_count, &sk->sk_drops);
+	SNMP_ADD_STATS(__UDPX_MIB(sk, ipv4), UDP_MIB_INERRORS, drop_count);
+	kfree_skb(skb);
+	return NULL;
 }
-
-#ifdef CONFIG_BOARD_XIAOMI
-#ifdef CONFIG_BPF
-static inline int udp_call_bpf(struct sock *sk, int op, u32 nargs, u32 *args)
-{
-	struct bpf_sock_ops_kern sock_ops;
-	int ret;
-
-	memset(&sock_ops, 0, offsetof(struct bpf_sock_ops_kern, temp));
-	if (sk_fullsock(sk)) {
-		sock_ops.is_fullsock = 1;
-		sock_owned_by_me(sk);
-	}
-
-	sock_ops.sk = sk;
-	sock_ops.op = op;
-	if (nargs > 0)
-		memcpy(sock_ops.args, args, nargs * sizeof(*args));
-
-	ret = BPF_CGROUP_RUN_PROG_SOCK_OPS(&sock_ops);
-	if (ret == 0)
-		ret = sock_ops.reply;
-	else
-		ret = -1;
-
-	return ret;
-}
-
-#else
-static inline int udp_call_bpf(struct sock *sk, int op, u32 nargs, u32 *args)
-{
-	return -EPERM;
-}
-#endif
-
-static inline void udp_state_bpf(struct sock *sk)
-{
-	udp_call_bpf(sk, BPF_SOCK_OPS_VOIP_CB, 0, NULL);
-}
-#endif
 
 #endif	/* _UDP_H */

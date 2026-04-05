@@ -50,7 +50,7 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long address,
 	struct vm_area_struct *vma;
 	int si_code;
 	vm_fault_t fault;
-	unsigned int flags = FAULT_FLAG_DEFAULT;
+	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
 
 	tsk = current;
 
@@ -104,7 +104,7 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long address,
 		goto no_context;
 
 retry:
-	mmap_read_lock(mm);
+	down_read(&mm->mmap_sem);
 	vma = find_vma(mm, address);
 
 	if (!vma)
@@ -161,7 +161,7 @@ good_area:
 
 	fault = handle_mm_fault(vma, address, flags);
 
-	if (fault_signal_pending(fault, regs))
+	if ((fault & VM_FAULT_RETRY) && fatal_signal_pending(current))
 		return;
 
 	if (unlikely(fault & VM_FAULT_ERROR)) {
@@ -181,6 +181,7 @@ good_area:
 		else
 			tsk->min_flt++;
 		if (fault & VM_FAULT_RETRY) {
+			flags &= ~FAULT_FLAG_ALLOW_RETRY;
 			flags |= FAULT_FLAG_TRIED;
 
 			 /* No need to up_read(&mm->mmap_sem) as we would
@@ -192,7 +193,7 @@ good_area:
 		}
 	}
 
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 	return;
 
 	/*
@@ -201,7 +202,7 @@ good_area:
 	 */
 
 bad_area:
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 
 bad_area_nosemaphore:
 
@@ -260,14 +261,14 @@ out_of_memory:
 	__asm__ __volatile__("l.nop 42");
 	__asm__ __volatile__("l.nop 1");
 
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 	if (!user_mode(regs))
 		goto no_context;
 	pagefault_out_of_memory();
 	return;
 
 do_sigbus:
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 
 	/*
 	 * Send a sigbus, regardless of whether we were in kernel

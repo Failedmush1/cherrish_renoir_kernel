@@ -407,7 +407,7 @@ static unsigned long mmap_base(unsigned long rnd, struct rlimit *rlim_stack)
 	if (gap + pad > gap)
 		gap += pad;
 
-	if (gap < MIN_GAP)
+	if (gap < MIN_GAP && MIN_GAP < MAX_GAP)
 		gap = MIN_GAP;
 	else if (gap > MAX_GAP)
 		gap = MAX_GAP;
@@ -459,7 +459,7 @@ int __account_locked_vm(struct mm_struct *mm, unsigned long pages, bool inc,
 	unsigned long locked_vm, limit;
 	int ret = 0;
 
-	mmap_assert_write_locked(mm);
+	lockdep_assert_held_write(&mm->mmap_sem);
 
 	locked_vm = mm->locked_vm;
 	if (inc) {
@@ -503,10 +503,10 @@ int account_locked_vm(struct mm_struct *mm, unsigned long pages, bool inc)
 	if (pages == 0 || !mm)
 		return 0;
 
-	mmap_write_lock(mm);
+	down_write(&mm->mmap_sem);
 	ret = __account_locked_vm(mm, pages, inc, current,
 				  capable(CAP_IPC_LOCK));
-	mmap_write_unlock(mm);
+	up_write(&mm->mmap_sem);
 
 	return ret;
 }
@@ -523,11 +523,11 @@ unsigned long vm_mmap_pgoff(struct file *file, unsigned long addr,
 
 	ret = security_mmap_file(file, prot, flag);
 	if (!ret) {
-		if (mmap_write_lock_killable(mm))
+		if (down_write_killable(&mm->mmap_sem))
 			return -EINTR;
 		ret = do_mmap_pgoff(file, addr, len, prot, flag, pgoff,
 				    &populate, &uf);
-		mmap_write_unlock(mm);
+		up_write(&mm->mmap_sem);
 		userfaultfd_unmap_complete(mm, &uf);
 		if (populate)
 			mm_populate(ret, populate);

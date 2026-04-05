@@ -379,6 +379,8 @@ static unsigned mmc_sdio_get_max_clock(struct mmc_card *card)
 	if (card->type == MMC_TYPE_SD_COMBO)
 		max_dtr = min(max_dtr, mmc_sd_get_max_clock(card));
 
+	max_dtr = min_not_zero(max_dtr, card->quirk_max_rate);
+
 	return max_dtr;
 }
 
@@ -866,7 +868,11 @@ static void mmc_sdio_remove(struct mmc_host *host)
  */
 static int mmc_sdio_alive(struct mmc_host *host)
 {
-	return mmc_select_card(host->card);
+	if (!mmc_host_is_spi(host))
+		return mmc_select_card(host->card);
+	else
+		return mmc_io_rw_direct(host->card, 0, 0, SDIO_CCCR_CCCR, 0,
+					NULL);
 }
 
 /*
@@ -971,7 +977,6 @@ static int mmc_sdio_suspend(struct mmc_host *host)
 	cancel_delayed_work_sync(&host->sdio_irq_work);
 
 	mmc_claim_host(host);
-	mmc_log_string(host, "Enter\n");
 
 	if (mmc_card_keep_power(host) && mmc_card_wake_sdio_irq(host))
 		sdio_disable_wide(host->card);
@@ -983,7 +988,6 @@ static int mmc_sdio_suspend(struct mmc_host *host)
 		mmc_retune_needed(host);
 	}
 
-	mmc_log_string(host, "Exit\n");
 	mmc_release_host(host);
 
 	return 0;
@@ -995,7 +999,6 @@ static int mmc_sdio_resume(struct mmc_host *host)
 
 	/* Basic card reinitialization. */
 	mmc_claim_host(host);
-	mmc_log_string(host, "Enter\n");
 
 	/*
 	 * Restore power and reinitialize the card when needed. Note that a
@@ -1041,11 +1044,9 @@ static int mmc_sdio_resume(struct mmc_host *host)
 	}
 
 out:
-	mmc_log_string(host, "Exit err: %d\n", err);
 	mmc_release_host(host);
 
 	host->pm_flags &= ~MMC_PM_KEEP_POWER;
-	host->pm_flags &= ~MMC_PM_WAKE_SDIO_IRQ;
 	return err;
 }
 

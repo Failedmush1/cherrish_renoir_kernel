@@ -1569,18 +1569,6 @@ int lock_device_hotplug_sysfs(void)
 	return restart_syscall();
 }
 
-int trylock_device_hotplug(void)
-{
-	return mutex_trylock(&device_hotplug_lock);
-}
-
-#ifdef CONFIG_SCHED_WALT
-void lock_device_hotplug_assert(void)
-{
-	lockdep_assert_held(&device_hotplug_lock);
-}
-#endif
-
 #ifdef CONFIG_BLOCK
 static inline int device_is_not_partition(struct device *dev)
 {
@@ -1942,8 +1930,11 @@ static ssize_t uevent_show(struct device *dev, struct device_attribute *attr,
 	if (!env)
 		return -ENOMEM;
 
+	/* Synchronize with really_probe() */
+	device_lock(dev);
 	/* let the kset specific function add its keys */
 	retval = kset->uevent_ops->uevent(kset, &dev->kobj, env);
+	device_unlock(dev);
 	if (retval)
 		goto out;
 

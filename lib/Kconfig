@@ -302,10 +302,6 @@ config ZSTD_DECOMPRESS
 	select XXHASH
 	tristate
 
-config ZSTD_COMMON
-	select XXHASH
-	tristate
-
 source "lib/xz/Kconfig"
 
 #
@@ -332,10 +328,6 @@ config DECOMPRESS_LZO
 
 config DECOMPRESS_LZ4
 	select LZ4_DECOMPRESS
-	tristate
-
-config DECOMPRESS_ZSTD
-	select ZSTD_DECOMPRESS
 	tristate
 
 #
@@ -631,15 +623,6 @@ config ARCH_STACKWALK
 config STACKDEPOT
 	bool
 	select STACKTRACE
-
-config STACK_HASH_ORDER_SHIFT
-	int "stack depot hash size (12 => 4KB, 20 => 1024KB)"
-	range 12 20
-	default 20
-	depends on STACKDEPOT
-	help
-	 Select the hash size as a power of 2 for the stackdepot hash table.
-	 Choose a lower value to reduce the memory impact.
 
 config SBITMAP
 	bool

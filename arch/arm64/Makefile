@@ -30,8 +30,11 @@ LDFLAGS_vmlinux	+= --fix-cortex-a53-843419
   endif
 endif
 
-ifeq ($(CONFIG_ARM64_USE_LSE_ATOMICS), y)
-  ifneq ($(CONFIG_ARM64_LSE_ATOMICS), y)
+# Check for binutils support for specific extensions
+lseinstr := $(call as-instr,.arch_extension lse,-DCONFIG_AS_LSE=1)
+
+ifeq ($(CONFIG_ARM64_LSE_ATOMICS), y)
+  ifeq ($(lseinstr),)
 $(warning LSE atomics not supported by binutils)
   endif
 endif
@@ -42,15 +45,19 @@ cc_has_k_constraint := $(call try-run,echo				\
 		return 0;						\
 	}' | $(CC) -S -x c -o "$$TMP" -,,-DCONFIG_CC_HAS_K_CONSTRAINT=1)
 
-ifeq ($(CONFIG_BROKEN_GAS_INST),y)
+ifeq ($(CONFIG_ARM64), y)
+brokengasinst := $(call as-instr,1:\n.inst 0\n.rept . - 1b\n\nnop\n.endr\n,,-DCONFIG_BROKEN_GAS_INST=1)
+
+  ifneq ($(brokengasinst),)
 $(warning Detected assembler with broken .inst; disassembly will be unreliable)
+  endif
 endif
 
-KBUILD_CFLAGS	+= -mgeneral-regs-only	\
+KBUILD_CFLAGS	+= -mgeneral-regs-only $(lseinstr) $(brokengasinst)	\
 		   $(compat_vdso) $(cc_has_k_constraint)
 KBUILD_CFLAGS	+= -fno-asynchronous-unwind-tables
 KBUILD_CFLAGS	+= $(call cc-disable-warning, psabi)
-KBUILD_AFLAGS	+= $(compat_vdso)
+KBUILD_AFLAGS	+= $(lseinstr) $(brokengasinst) $(compat_vdso)
 
 KBUILD_CFLAGS	+= $(call cc-option,-mabi=lp64)
 KBUILD_AFLAGS	+= $(call cc-option,-mabi=lp64)
@@ -76,6 +83,7 @@ endif
 ifeq ($(CONFIG_CPU_BIG_ENDIAN), y)
 KBUILD_CPPFLAGS	+= -mbig-endian
 CHECKFLAGS	+= -D__AARCH64EB__
+AS		+= -EB
 # Prefer the baremetal ELF build target, but not all toolchains include
 # it so fall back to the standard linux version if needed.
 KBUILD_LDFLAGS	+= -EB $(call ld-option, -maarch64elfb, -maarch64linuxb -z norelro)
@@ -83,6 +91,7 @@ UTS_MACHINE	:= aarch64_be
 else
 KBUILD_CPPFLAGS	+= -mlittle-endian
 CHECKFLAGS	+= -D__AARCH64EL__
+AS		+= -EL
 # Same as above, prefer ELF but fall back to linux target if needed.
 KBUILD_LDFLAGS	+= -EL $(call ld-option, -maarch64elf, -maarch64linux -z norelro)
 UTS_MACHINE	:= aarch64
@@ -126,21 +135,12 @@ core-y		+= arch/arm64/
 libs-y		:= arch/arm64/lib/ $(libs-y)
 core-$(CONFIG_EFI_STUB) += $(objtree)/drivers/firmware/efi/libstub/lib.a
 
-ifeq ($(CONFIG_BUILD_ARM64_KERNEL_COMPRESSION_GZIP),y)
-KBUILD_TARGET   := Image.gz
-else
-KBUILD_TARGET   := Image
-endif
-
-ifeq ($(CONFIG_BUILD_ARM64_DT_OVERLAY),y)
-KBUILD_TARGET   += dtbo.img
-endif
-
 # Default target when executing plain make
 boot		:= arch/arm64/boot
-KBUILD_IMAGE	:= $(boot)/$(KBUILD_TARGET)
+KBUILD_IMAGE	:= $(boot)/Image.gz
 
-all:	$(KBUILD_TARGET)
+all:	Image.gz
+
 
 Image: vmlinux
 	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
@@ -150,11 +150,6 @@ Image.%: Image
 
 zinstall install:
 	$(Q)$(MAKE) $(build)=$(boot) $@
-
-ifeq ($(CONFIG_BUILD_ARM64_DT_OVERLAY),y)
-dtbo.img: dtbs
-	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
-endif
 
 PHONY += vdso_install
 vdso_install:

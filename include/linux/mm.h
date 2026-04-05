@@ -303,7 +303,7 @@ extern unsigned int kobjsize(const void *objp);
 #define VM_MIXEDMAP	0x10000000	/* Can contain "struct page" and pure PFN pages */
 #define VM_HUGEPAGE	0x20000000	/* MADV_HUGEPAGE marked this vma */
 #define VM_NOHUGEPAGE	0x40000000	/* MADV_NOHUGEPAGE marked this vma */
-#define VM_MERGEABLE	0x80000000	/* KSM may merge identical pages */
+#define VM_MERGEABLE	BIT(31)		/* KSM may merge identical pages */
 
 #ifdef CONFIG_ARCH_USES_HIGH_VMA_FLAGS
 #define VM_HIGH_ARCH_BIT_0	32	/* bit only usable on 64-bit architectures */
@@ -357,13 +357,6 @@ extern unsigned int kobjsize(const void *objp);
 # define VM_GROWSUP	VM_NONE
 #endif
 
-#ifdef CONFIG_HAVE_ARCH_USERFAULTFD_MINOR
-# define VM_UFFD_MINOR_BIT	37
-# define VM_UFFD_MINOR		BIT(VM_UFFD_MINOR_BIT)	/* UFFD minor faults */
-#else /* !CONFIG_HAVE_ARCH_USERFAULTFD_MINOR */
-# define VM_UFFD_MINOR		VM_NONE
-#endif /* CONFIG_HAVE_ARCH_USERFAULTFD_MINOR */
-
 /* Bits set in the VMA until the stack is in its final location */
 #define VM_STACK_INCOMPLETE_SETUP	(VM_RAND_READ | VM_SEQ_READ)
 
@@ -403,77 +396,15 @@ extern unsigned int kobjsize(const void *objp);
  */
 extern pgprot_t protection_map[16];
 
-/**
- * Fault flag definitions.
- *
- * @FAULT_FLAG_WRITE: Fault was a write fault.
- * @FAULT_FLAG_MKWRITE: Fault was mkwrite of existing PTE.
- * @FAULT_FLAG_ALLOW_RETRY: Allow to retry the fault if blocked.
- * @FAULT_FLAG_RETRY_NOWAIT: Don't drop mmap_sem and wait when retrying.
- * @FAULT_FLAG_KILLABLE: The fault task is in SIGKILL killable region.
- * @FAULT_FLAG_TRIED: The fault has been tried once.
- * @FAULT_FLAG_USER: The fault originated in userspace.
- * @FAULT_FLAG_REMOTE: The fault is not for current task/mm.
- * @FAULT_FLAG_INSTRUCTION: The fault was during an instruction fetch.
- * @FAULT_FLAG_INTERRUPTIBLE: The fault can be interrupted by non-fatal signals.
- *
- * About @FAULT_FLAG_ALLOW_RETRY and @FAULT_FLAG_TRIED: we can specify
- * whether we would allow page faults to retry by specifying these two
- * fault flags correctly.  Currently there can be three legal combinations:
- *
- * (a) ALLOW_RETRY and !TRIED:  this means the page fault allows retry, and
- *                              this is the first try
- *
- * (b) ALLOW_RETRY and TRIED:   this means the page fault allows retry, and
- *                              we've already tried at least once
- *
- * (c) !ALLOW_RETRY and !TRIED: this means the page fault does not allow retry
- *
- * The unlisted combination (!ALLOW_RETRY && TRIED) is illegal and should never
- * be used.  Note that page faults can be allowed to retry for multiple times,
- * in which case we'll have an initial fault with flags (a) then later on
- * continuous faults with flags (b).  We should always try to detect pending
- * signals before a retry to make sure the continuous page faults can still be
- * interrupted if necessary.
- */
-#define FAULT_FLAG_WRITE			0x01
-#define FAULT_FLAG_MKWRITE			0x02
-#define FAULT_FLAG_ALLOW_RETRY			0x04
-#define FAULT_FLAG_RETRY_NOWAIT			0x08
-#define FAULT_FLAG_KILLABLE			0x10
-#define FAULT_FLAG_TRIED			0x20
-#define FAULT_FLAG_USER				0x40
-#define FAULT_FLAG_REMOTE			0x80
-#define FAULT_FLAG_INSTRUCTION  		0x100
-#define FAULT_FLAG_INTERRUPTIBLE		0x200
-/* Speculative fault, not holding mmap_sem */
-#define FAULT_FLAG_SPECULATIVE			0x400
-
-/*
- * The default fault flags that should be used by most of the
- * arch-specific page fault handlers.
- */
-#define FAULT_FLAG_DEFAULT  (FAULT_FLAG_ALLOW_RETRY | \
-			     FAULT_FLAG_KILLABLE | \
-			     FAULT_FLAG_INTERRUPTIBLE)
-
-/**
- * fault_flag_allow_retry_first - check ALLOW_RETRY the first time
- *
- * This is mostly used for places where we want to try to avoid taking
- * the mmap_sem for too long a time when waiting for another condition
- * to change, in which case we can try to be polite to release the
- * mmap_sem in the first round to avoid potential starvation of other
- * processes that would also want the mmap_sem.
- *
- * Return: true if the page fault allows retry and this is the first
- * attempt of the fault handling; false otherwise.
- */
-static inline bool fault_flag_allow_retry_first(unsigned int flags)
-{
-	return (flags & FAULT_FLAG_ALLOW_RETRY) &&
-	    (!(flags & FAULT_FLAG_TRIED));
-}
+#define FAULT_FLAG_WRITE	0x01	/* Fault was a write access */
+#define FAULT_FLAG_MKWRITE	0x02	/* Fault was mkwrite of existing pte */
+#define FAULT_FLAG_ALLOW_RETRY	0x04	/* Retry fault if blocking */
+#define FAULT_FLAG_RETRY_NOWAIT	0x08	/* Don't drop mmap_sem and wait when retrying */
+#define FAULT_FLAG_KILLABLE	0x10	/* The fault task is in SIGKILL killable region */
+#define FAULT_FLAG_TRIED	0x20	/* Second try */
+#define FAULT_FLAG_USER		0x40	/* The fault originated in userspace */
+#define FAULT_FLAG_REMOTE	0x80	/* faulting for non current tsk/mm */
+#define FAULT_FLAG_INSTRUCTION  0x100	/* The fault was during an instruction fetch */
 
 #define FAULT_FLAG_TRACE \
 	{ FAULT_FLAG_WRITE,		"WRITE" }, \
@@ -484,8 +415,7 @@ static inline bool fault_flag_allow_retry_first(unsigned int flags)
 	{ FAULT_FLAG_TRIED,		"TRIED" }, \
 	{ FAULT_FLAG_USER,		"USER" }, \
 	{ FAULT_FLAG_REMOTE,		"REMOTE" }, \
-	{ FAULT_FLAG_INSTRUCTION,	"INSTRUCTION" }, \
-	{ FAULT_FLAG_INTERRUPTIBLE,	"INTERRUPTIBLE" }
+	{ FAULT_FLAG_INSTRUCTION,	"INSTRUCTION" }
 
 /*
  * vm_fault is filled by the the pagefault handler and passed to the vma's
@@ -498,18 +428,11 @@ static inline bool fault_flag_allow_retry_first(unsigned int flags)
  * pgoff should be used in favour of virtual_address, if possible.
  */
 struct vm_fault {
-#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
-	unsigned int sequence;
-	pmd_t orig_pmd;			/* value of PMD at the time of fault */
-#endif
-	const struct {
-		struct vm_area_struct *vma;	/* Target VMA */
-		gfp_t gfp_mask;			/* gfp mask to be used for allocations */
-		pgoff_t pgoff;			/* Logical page offset based on vma */
-		unsigned long address;		/* Faulting virtual address */
-	};
-	unsigned int flags;		/* FAULT_FLAG_xxx flags
-					 * XXX: should really be 'const' */
+	struct vm_area_struct *vma;	/* Target VMA */
+	unsigned int flags;		/* FAULT_FLAG_xxx flags */
+	gfp_t gfp_mask;			/* gfp mask to be used for allocations */
+	pgoff_t pgoff;			/* Logical page offset based on vma */
+	unsigned long address;		/* Faulting virtual address */
 	pmd_t *pmd;			/* Pointer to pmd entry matching
 					 * the 'address' */
 	pud_t *pud;			/* Pointer to pud entry matching
@@ -518,6 +441,7 @@ struct vm_fault {
 	pte_t orig_pte;			/* Value of PTE at the time of fault */
 
 	struct page *cow_page;		/* Page handler may use for COW fault */
+	struct mem_cgroup *memcg;	/* Cgroup cow_page belongs to */
 	struct page *page;		/* ->fault handlers should return a
 					 * page here, unless VM_FAULT_NOPAGE
 					 * is set (which is also implied by
@@ -533,8 +457,8 @@ struct vm_fault {
 					 * is not NULL, otherwise pmd.
 					 */
 	pgtable_t prealloc_pte;		/* Pre-allocated pte page table.
-					 * vm_ops->map_pages() sets up a page
-					 * table from atomic context.
+					 * vm_ops->map_pages() calls
+					 * alloc_set_pte() from atomic context.
 					 * do_fault_around() pre-allocates
 					 * page table to avoid allocation from
 					 * atomic context.
@@ -565,7 +489,7 @@ struct vm_operations_struct {
 	vm_fault_t (*fault)(struct vm_fault *vmf);
 	vm_fault_t (*huge_fault)(struct vm_fault *vmf,
 			enum page_entry_size pe_size);
-	vm_fault_t (*map_pages)(struct vm_fault *vmf,
+	void (*map_pages)(struct vm_fault *vmf,
 			pgoff_t start_pgoff, pgoff_t end_pgoff);
 	unsigned long (*pagesize)(struct vm_area_struct * area);
 
@@ -624,15 +548,6 @@ struct vm_operations_struct {
 	ANDROID_KABI_RESERVE(4);
 };
 
-static inline void INIT_VMA(struct vm_area_struct *vma)
-{
-	INIT_LIST_HEAD(&vma->anon_vma_chain);
-#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
-	seqcount_init(&vma->vm_sequence);
-	atomic_set(&vma->vm_ref_count, 1);
-#endif
-}
-
 static inline void vma_init(struct vm_area_struct *vma, struct mm_struct *mm)
 {
 	static const struct vm_operations_struct dummy_vm_ops = {};
@@ -640,7 +555,7 @@ static inline void vma_init(struct vm_area_struct *vma, struct mm_struct *mm)
 	memset(vma, 0, sizeof(*vma));
 	vma->vm_mm = mm;
 	vma->vm_ops = &dummy_vm_ops;
-	INIT_VMA(vma);
+	INIT_LIST_HEAD(&vma->anon_vma_chain);
 }
 
 static inline void vma_set_anonymous(struct vm_area_struct *vma)
@@ -651,6 +566,17 @@ static inline void vma_set_anonymous(struct vm_area_struct *vma)
 static inline bool vma_is_anonymous(struct vm_area_struct *vma)
 {
 	return !vma->vm_ops;
+}
+
+static inline bool is_shared_maywrite(vm_flags_t vm_flags)
+{
+	return (vm_flags & (VM_SHARED | VM_MAYWRITE)) ==
+		(VM_SHARED | VM_MAYWRITE);
+}
+
+static inline bool vma_is_shared_maywrite(struct vm_area_struct *vma)
+{
+	return is_shared_maywrite(vma->vm_flags);
 }
 
 #ifdef CONFIG_SHMEM
@@ -670,6 +596,21 @@ int vma_is_stack_for_current(struct vm_area_struct *vma);
 
 struct mmu_gather;
 struct inode;
+
+#if !defined(CONFIG_ARCH_HAS_PTE_DEVMAP) || !defined(CONFIG_TRANSPARENT_HUGEPAGE)
+static inline int pmd_devmap(pmd_t pmd)
+{
+	return 0;
+}
+static inline int pud_devmap(pud_t pud)
+{
+	return 0;
+}
+static inline int pgd_devmap(pgd_t pgd)
+{
+	return 0;
+}
+#endif
 
 /*
  * FIXME: take this include out, include page-flags.h in
@@ -732,10 +673,6 @@ unsigned long vmalloc_to_pfn(const void *addr);
  * On nommu, vmalloc/vfree wrap through kmalloc/kfree directly, so there
  * is no special casing required.
  */
-
-#ifdef CONFIG_ENABLE_VMALLOC_SAVING
-extern bool is_vmalloc_addr(const void *x);
-#else
 static inline bool is_vmalloc_addr(const void *x)
 {
 #ifdef CONFIG_MMU
@@ -746,7 +683,6 @@ static inline bool is_vmalloc_addr(const void *x)
 	return false;
 #endif
 }
-#endif //CONFIG_ENABLE_VMALLOC_SAVING
 
 #ifndef is_ioremap_addr
 #define is_ioremap_addr(x) is_vmalloc_addr(x)
@@ -936,16 +872,15 @@ void free_compound_page(struct page *page);
  * pte_mkwrite.  But get_user_pages can cause write faults for mappings
  * that do not have writing enabled, when used by access_process_vm.
  */
-static inline pte_t maybe_mkwrite(pte_t pte, unsigned long vma_flags)
+static inline pte_t maybe_mkwrite(pte_t pte, struct vm_area_struct *vma)
 {
-	if (likely(vma_flags & VM_WRITE))
+	if (likely(vma->vm_flags & VM_WRITE))
 		pte = pte_mkwrite(pte);
 	return pte;
 }
 
-vm_fault_t do_set_pmd(struct vm_fault *vmf, struct page *page);
-void do_set_pte(struct vm_fault *vmf, struct page *page, unsigned long addr);
-
+vm_fault_t alloc_set_pte(struct vm_fault *vmf, struct mem_cgroup *memcg,
+		struct page *page);
 vm_fault_t finish_fault(struct vm_fault *vmf);
 vm_fault_t finish_mkwrite_fault(struct vm_fault *vmf);
 #endif
@@ -1560,14 +1495,8 @@ struct zap_details {
 	struct page *single_page;		/* Locked page to be unmapped */
 };
 
-struct page *_vm_normal_page(struct vm_area_struct *vma, unsigned long addr,
-			      pte_t pte, unsigned long vma_flags);
-static inline struct page *vm_normal_page(struct vm_area_struct *vma,
-					  unsigned long addr, pte_t pte)
-{
-	return _vm_normal_page(vma, addr, pte, vma->vm_flags);
-}
-
+struct page *vm_normal_page(struct vm_area_struct *vma, unsigned long addr,
+			     pte_t pte);
 struct page *vm_normal_page_pmd(struct vm_area_struct *vma, unsigned long addr,
 				pmd_t pmd);
 
@@ -1596,34 +1525,6 @@ int follow_phys(struct vm_area_struct *vma, unsigned long address,
 int generic_access_phys(struct vm_area_struct *vma, unsigned long addr,
 			void *buf, int len, int write);
 
-#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
-static inline void vm_write_begin(struct vm_area_struct *vma)
-{
-        /*
-         * Isolated vma might be freed without exclusive mmap_lock but
-         * speculative page fault handler still needs to know it was changed.
-         */
-        if (!RB_EMPTY_NODE(&vma->vm_rb))
-		WARN_ON_ONCE(!rwsem_is_locked(&(vma->vm_mm)->mmap_lock));
-	/*
-	 * The reads never spins and preemption
-	 * disablement is not required.
-	 */
-	raw_write_seqcount_begin(&vma->vm_sequence);
-}
-static inline void vm_write_end(struct vm_area_struct *vma)
-{
-	raw_write_seqcount_end(&vma->vm_sequence);
-}
-#else
-static inline void vm_write_begin(struct vm_area_struct *vma)
-{
-}
-static inline void vm_write_end(struct vm_area_struct *vma)
-{
-}
-#endif /* CONFIG_SPECULATIVE_PAGE_FAULT */
-
 extern void truncate_pagecache(struct inode *inode, loff_t new);
 extern void truncate_setsize(struct inode *inode, loff_t newsize);
 void pagecache_isize_extended(struct inode *inode, loff_t from, loff_t to);
@@ -1635,43 +1536,6 @@ int invalidate_inode_page(struct page *page);
 #ifdef CONFIG_MMU
 extern vm_fault_t handle_mm_fault(struct vm_area_struct *vma,
 			unsigned long address, unsigned int flags);
-
-#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
-extern int __handle_speculative_fault(struct mm_struct *mm,
-				      unsigned long address,
-				      unsigned int flags,
-				      struct vm_area_struct **vma);
-static inline int handle_speculative_fault(struct mm_struct *mm,
-					   unsigned long address,
-					   unsigned int flags,
-					   struct vm_area_struct **vma)
-{
-	/*
-	 * Try speculative page fault for multithreaded user space task only.
-	 */
-	if (!(flags & FAULT_FLAG_USER) || atomic_read(&mm->mm_users) == 1) {
-		*vma = NULL;
-		return VM_FAULT_RETRY;
-	}
-	return __handle_speculative_fault(mm, address, flags, vma);
-}
-extern bool can_reuse_spf_vma(struct vm_area_struct *vma,
-			      unsigned long address);
-#else
-static inline int handle_speculative_fault(struct mm_struct *mm,
-					   unsigned long address,
-					   unsigned int flags,
-					   struct vm_area_struct **vma)
-{
-	return VM_FAULT_RETRY;
-}
-static inline bool can_reuse_spf_vma(struct vm_area_struct *vma,
-				     unsigned long address)
-{
-	return false;
-}
-#endif /* CONFIG_SPECULATIVE_PAGE_FAULT */
-
 extern int fixup_user_fault(struct task_struct *tsk, struct mm_struct *mm,
 			    unsigned long address, unsigned int fault_flags,
 			    bool *unlocked);
@@ -2406,7 +2270,6 @@ extern void set_dma_reserve(unsigned long new_dma_reserve);
 extern void memmap_init_zone(unsigned long, int, unsigned long, unsigned long,
 		enum meminit_context, struct vmem_altmap *);
 extern void setup_per_zone_wmarks(void);
-extern void update_kswapd_threads(void);
 extern int __meminit init_per_zone_wmark_min(void);
 extern void mem_init(void);
 extern void __init mmap_init(void);
@@ -2427,7 +2290,6 @@ extern void zone_pcp_update(struct zone *zone);
 extern void zone_pcp_reset(struct zone *zone);
 
 /* page_alloc.c */
-extern int kswapd_threads;
 extern int min_free_kbytes;
 extern int watermark_boost_factor;
 extern int watermark_scale_factor;
@@ -2474,29 +2336,16 @@ void anon_vma_interval_tree_verify(struct anon_vma_chain *node);
 extern int __vm_enough_memory(struct mm_struct *mm, long pages, int cap_sys_admin);
 extern int __vma_adjust(struct vm_area_struct *vma, unsigned long start,
 	unsigned long end, pgoff_t pgoff, struct vm_area_struct *insert,
-	struct vm_area_struct *expand, bool keep_locked);
+	struct vm_area_struct *expand);
 static inline int vma_adjust(struct vm_area_struct *vma, unsigned long start,
 	unsigned long end, pgoff_t pgoff, struct vm_area_struct *insert)
 {
-	return __vma_adjust(vma, start, end, pgoff, insert, NULL, false);
+	return __vma_adjust(vma, start, end, pgoff, insert, NULL);
 }
-
-extern struct vm_area_struct *__vma_merge(struct mm_struct *mm,
+extern struct vm_area_struct *vma_merge(struct mm_struct *,
 	struct vm_area_struct *prev, unsigned long addr, unsigned long end,
-	unsigned long vm_flags, struct anon_vma *anon, struct file *file,
-	pgoff_t pgoff, struct mempolicy *mpol, struct vm_userfaultfd_ctx uff,
-	const char __user *user, bool keep_locked);
-
-static inline struct vm_area_struct *vma_merge(struct mm_struct *mm,
-	struct vm_area_struct *prev, unsigned long addr, unsigned long end,
-	unsigned long vm_flags, struct anon_vma *anon, struct file *file,
-	pgoff_t off, struct mempolicy *pol, struct vm_userfaultfd_ctx uff,
-	const char __user *user)
-{
-	return __vma_merge(mm, prev, addr, end, vm_flags, anon, file, off,
-			   pol, uff, user, false);
-}
-
+	unsigned long vm_flags, struct anon_vma *, struct file *, pgoff_t,
+	struct mempolicy *, struct vm_userfaultfd_ctx, const char __user *);
 extern struct anon_vma *find_mergeable_anon_vma(struct vm_area_struct *);
 extern int __split_vma(struct mm_struct *, struct vm_area_struct *,
 	unsigned long addr, int new_below);
@@ -2562,8 +2411,6 @@ extern int __do_munmap(struct mm_struct *, unsigned long, size_t,
 		       struct list_head *uf, bool downgrade);
 extern int do_munmap(struct mm_struct *, unsigned long, size_t,
 		     struct list_head *uf);
-extern int do_madvise(struct task_struct *target_task, struct mm_struct *mm,
-		unsigned long start, size_t len_in, int behavior);
 
 static inline unsigned long
 do_mmap_pgoff(struct file *file, unsigned long addr,
@@ -2604,7 +2451,26 @@ struct vm_unmapped_area_info {
 	unsigned long align_offset;
 };
 
-extern unsigned long vm_unmapped_area(struct vm_unmapped_area_info *info);
+extern unsigned long unmapped_area(struct vm_unmapped_area_info *info);
+extern unsigned long unmapped_area_topdown(struct vm_unmapped_area_info *info);
+
+/*
+ * Search for an unmapped address range.
+ *
+ * We are looking for a range that:
+ * - does not intersect with any VMA;
+ * - is contained within the [low_limit, high_limit) interval;
+ * - is at least the desired size.
+ * - satisfies (begin_addr & align_mask) == (align_offset & align_mask)
+ */
+static inline unsigned long
+vm_unmapped_area(struct vm_unmapped_area_info *info)
+{
+	if (info->flags & VM_UNMAPPED_AREA_TOPDOWN)
+		return unmapped_area_topdown(info);
+	else
+		return unmapped_area(info);
+}
 
 /* truncate.c */
 extern void truncate_inode_pages(struct address_space *, loff_t);
@@ -2614,13 +2480,32 @@ extern void truncate_inode_pages_final(struct address_space *);
 
 /* generic vm_area_ops exported for stackable file systems */
 extern vm_fault_t filemap_fault(struct vm_fault *vmf);
-extern vm_fault_t filemap_map_pages(struct vm_fault *vmf,
+extern void filemap_map_pages(struct vm_fault *vmf,
 		pgoff_t start_pgoff, pgoff_t end_pgoff);
 extern vm_fault_t filemap_page_mkwrite(struct vm_fault *vmf);
 
 /* mm/page-writeback.c */
 int __must_check write_one_page(struct page *page);
 void task_dirty_inc(struct task_struct *tsk);
+
+/* readahead.c */
+#define VM_READAHEAD_PAGES	(SZ_128K / PAGE_SIZE)
+
+int force_page_cache_readahead(struct address_space *mapping, struct file *filp,
+			pgoff_t offset, unsigned long nr_to_read);
+
+void page_cache_sync_readahead(struct address_space *mapping,
+			       struct file_ra_state *ra,
+			       struct file *filp,
+			       pgoff_t offset,
+			       unsigned long size);
+
+void page_cache_async_readahead(struct address_space *mapping,
+				struct file_ra_state *ra,
+				struct file *filp,
+				struct page *pg,
+				pgoff_t offset,
+				unsigned long size);
 
 extern unsigned long stack_guard_gap;
 /* Generic expand stack which grows the stack according to GROWS{UP,DOWN} */
@@ -2720,6 +2605,8 @@ unsigned long change_prot_numa(struct vm_area_struct *vma,
 struct vm_area_struct *find_extend_vma(struct mm_struct *, unsigned long addr);
 int remap_pfn_range(struct vm_area_struct *, unsigned long addr,
 			unsigned long pfn, unsigned long size, pgprot_t);
+int remap_pfn_range_notrack(struct vm_area_struct *vma, unsigned long addr,
+		unsigned long pfn, unsigned long size, pgprot_t prot);
 int vm_insert_page(struct vm_area_struct *, unsigned long addr, struct page *);
 int vm_map_pages(struct vm_area_struct *vma, struct page **pages,
 				unsigned long num);
@@ -3086,34 +2973,27 @@ static inline int pages_identical(struct page *page1, struct page *page2)
 	return !memcmp_pages(page1, page2);
 }
 
-#ifndef CONFIG_MULTIPLE_KSWAPD
-static inline void update_kswapd_threads_node(int nid) {}
-static inline int multi_kswapd_run(int nid) { return 0; }
-static inline void multi_kswapd_stop(int nid) {}
-static inline void multi_kswapd_cpu_online(pg_data_t *pgdat,
-					const struct cpumask *mask) {}
-#endif /* CONFIG_MULTIPLE_KSWAPD */
-
 /**
- * seal_check_future_write - Check for F_SEAL_FUTURE_WRITE flag and handle it
+ * seal_check_write - Check for F_SEAL_WRITE or F_SEAL_FUTURE_WRITE flags and
+ *                    handle them.
  * @seals: the seals to check
  * @vma: the vma to operate on
  *
- * Check whether F_SEAL_FUTURE_WRITE is set; if so, do proper check/handling on
- * the vma flags.  Return 0 if check pass, or <0 for errors.
+ * Check whether F_SEAL_WRITE or F_SEAL_FUTURE_WRITE are set; if so, do proper
+ * check/handling on the vma flags.  Return 0 if check pass, or <0 for errors.
  */
-static inline int seal_check_future_write(int seals, struct vm_area_struct *vma)
+static inline int seal_check_write(int seals, struct vm_area_struct *vma)
 {
-	if (seals & F_SEAL_FUTURE_WRITE) {
+	if (seals & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE)) {
 		/*
 		 * New PROT_WRITE and MAP_SHARED mmaps are not allowed when
-		 * "future write" seal active.
+		 * write seals are active.
 		 */
 		if ((vma->vm_flags & VM_SHARED) && (vma->vm_flags & VM_WRITE))
 			return -EPERM;
 
 		/*
-		 * Since an F_SEAL_FUTURE_WRITE sealed memfd can be mapped as
+		 * Since an F_SEAL_[FUTURE_]WRITE sealed memfd can be mapped as
 		 * MAP_SHARED and read-only, take care to not allow mprotect to
 		 * revert protections on such mappings. Do this only for shared
 		 * mappings. For private mappings, don't need to mask

@@ -267,7 +267,7 @@ asmlinkage void __kprobes do_sparc64_fault(struct pt_regs *regs)
 	int si_code, fault_code;
 	vm_fault_t fault;
 	unsigned long address, mm_rss;
-	unsigned int flags = FAULT_FLAG_DEFAULT;
+	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
 
 	fault_code = get_thread_fault_code();
 
@@ -315,7 +315,7 @@ asmlinkage void __kprobes do_sparc64_fault(struct pt_regs *regs)
 
 	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, address);
 
-	if (!mmap_read_trylock(mm)) {
+	if (!down_read_trylock(&mm->mmap_sem)) {
 		if ((regs->tstate & TSTATE_PRIV) &&
 		    !search_exception_tables(regs->tpc)) {
 			insn = get_fault_insn(regs, insn);
@@ -323,7 +323,7 @@ asmlinkage void __kprobes do_sparc64_fault(struct pt_regs *regs)
 		}
 
 retry:
-		mmap_read_lock(mm);
+		down_read(&mm->mmap_sem);
 	}
 
 	if (fault_code & FAULT_CODE_BAD_RA)
@@ -421,7 +421,7 @@ good_area:
 
 	fault = handle_mm_fault(vma, address, flags);
 
-	if (fault_signal_pending(fault, regs))
+	if ((fault & VM_FAULT_RETRY) && fatal_signal_pending(current))
 		goto exit_exception;
 
 	if (unlikely(fault & VM_FAULT_ERROR)) {
@@ -445,6 +445,7 @@ good_area:
 				      1, regs, address);
 		}
 		if (fault & VM_FAULT_RETRY) {
+			flags &= ~FAULT_FLAG_ALLOW_RETRY;
 			flags |= FAULT_FLAG_TRIED;
 
 			/* No need to up_read(&mm->mmap_sem) as we would
@@ -455,7 +456,7 @@ good_area:
 			goto retry;
 		}
 	}
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 
 	mm_rss = get_mm_rss(mm);
 #if defined(CONFIG_TRANSPARENT_HUGEPAGE)
@@ -486,7 +487,7 @@ exit_exception:
 	 */
 bad_area:
 	insn = get_fault_insn(regs, insn);
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 
 handle_kernel_fault:
 	do_kernel_fault(regs, si_code, fault_code, insn, address);
@@ -498,7 +499,7 @@ handle_kernel_fault:
  */
 out_of_memory:
 	insn = get_fault_insn(regs, insn);
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 	if (!(regs->tstate & TSTATE_PRIV)) {
 		pagefault_out_of_memory();
 		goto exit_exception;
@@ -511,7 +512,7 @@ intr_or_no_mm:
 
 do_sigbus:
 	insn = get_fault_insn(regs, insn);
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 
 	/*
 	 * Send a sigbus, regardless of whether we were in kernel

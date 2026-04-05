@@ -248,8 +248,8 @@ dump_counters(struct sk_buff *skb, struct nf_conn_acct *acct,
 		pkts = atomic64_xchg(&counter[dir].packets, 0);
 		bytes = atomic64_xchg(&counter[dir].bytes, 0);
 	} else {
-		pkts = (u64)atomic64_read(&counter[dir].packets);
-		bytes = (u64)atomic64_read(&counter[dir].bytes);
+		pkts = atomic64_read(&counter[dir].packets);
+		bytes = atomic64_read(&counter[dir].bytes);
 	}
 
 	nest_count = nla_nest_start(skb, attr);
@@ -357,7 +357,7 @@ nla_put_failure:
 #define ctnetlink_dump_secctx(a, b) (0)
 #endif
 
-#ifdef CONFIG_NF_CONNTRACK_LABELS
+#ifdef CONFIG_NF_CONNTRACK_EVENTS
 static inline int ctnetlink_label_size(const struct nf_conn *ct)
 {
 	struct nf_conn_labels *labels = nf_ct_labels_find(ct);
@@ -366,6 +366,7 @@ static inline int ctnetlink_label_size(const struct nf_conn *ct)
 		return 0;
 	return nla_total_size(sizeof(labels->bits));
 }
+#endif
 
 static int
 ctnetlink_dump_labels(struct sk_buff *skb, const struct nf_conn *ct)
@@ -386,10 +387,6 @@ ctnetlink_dump_labels(struct sk_buff *skb, const struct nf_conn *ct)
 
 	return 0;
 }
-#else
-#define ctnetlink_dump_labels(a, b) (0)
-#define ctnetlink_label_size(a)	(0)
-#endif
 
 #define master_tuple(ct) &(ct->master->tuplehash[IP_CT_DIR_ORIGINAL].tuple)
 
@@ -781,11 +778,6 @@ ctnetlink_conntrack_event(unsigned int events, struct nf_ct_event *item)
 
 		if (events & (1 << IPCT_SYNPROXY) &&
 		    ctnetlink_dump_ct_synproxy(skb, ct) < 0)
-
-#ifdef CONFIG_ENABLE_SFE
-		if (events & (1 << IPCT_COUNTER) &&
-		    ctnetlink_dump_acct(skb, ct, 0) < 0)
-#endif
 			goto nla_put_failure;
 	}
 
@@ -816,8 +808,6 @@ errout:
 
 static int ctnetlink_done(struct netlink_callback *cb)
 {
-	if (cb->args[1])
-		nf_ct_put((struct nf_conn *)cb->args[1]);
 	kfree(cb->data);
 	return 0;
 }
@@ -898,18 +888,25 @@ ignore_entry:
 	return 0;
 }
 
+static unsigned long ctnetlink_get_id(const struct nf_conn *ct)
+{
+	unsigned long id = nf_ct_get_id(ct);
+
+	return id ? id : 1;
+}
+
 static int
 ctnetlink_dump_table(struct sk_buff *skb, struct netlink_callback *cb)
 {
 	struct net *net = sock_net(skb->sk);
-	struct nf_conn *ct, *last;
+	unsigned long last_id = cb->args[1];
 	struct nf_conntrack_tuple_hash *h;
 	struct hlist_nulls_node *n;
 	struct nf_conn *nf_ct_evict[8];
+	struct nf_conn *ct;
 	int res, i;
 	spinlock_t *lockp;
 
-	last = (struct nf_conn *)cb->args[1];
 	i = 0;
 
 	local_bh_disable();
@@ -944,7 +941,7 @@ restart:
 				continue;
 
 			if (cb->args[1]) {
-				if (ct != last)
+				if (ctnetlink_get_id(ct) != last_id)
 					continue;
 				cb->args[1] = 0;
 			}
@@ -959,8 +956,7 @@ restart:
 					    ct);
 			rcu_read_unlock();
 			if (res < 0) {
-				nf_conntrack_get(&ct->ct_general);
-				cb->args[1] = (unsigned long)ct;
+				cb->args[1] = ctnetlink_get_id(ct);
 				spin_unlock(lockp);
 				goto out;
 			}
@@ -973,12 +969,10 @@ restart:
 	}
 out:
 	local_bh_enable();
-	if (last) {
+	if (last_id) {
 		/* nf ct hash resize happened, now clear the leftover. */
-		if ((struct nf_conn *)cb->args[1] == last)
+		if (cb->args[1] == last_id)
 			cb->args[1] = 0;
-
-		nf_ct_put(last);
 	}
 
 	while (i) {
@@ -1678,11 +1672,6 @@ static int ctnetlink_change_timeout(struct nf_conn *ct,
 				    const struct nlattr * const cda[])
 {
 	u64 timeout = (u64)ntohl(nla_get_be32(cda[CTA_TIMEOUT])) * HZ;
-#if defined(CONFIG_IP_NF_TARGET_NATTYPE_MODULE)
-	bool (*nattype_ref_timer)
-		(unsigned long nattype,
-		unsigned long timeout_value);
-#endif
 
 	if (timeout > INT_MAX)
 		timeout = INT_MAX;
@@ -1691,12 +1680,6 @@ static int ctnetlink_change_timeout(struct nf_conn *ct,
 	if (test_bit(IPS_DYING_BIT, &ct->status))
 		return -ETIME;
 
-/* Refresh the NAT type entry. */
-#if defined(CONFIG_IP_NF_TARGET_NATTYPE_MODULE)
-	nattype_ref_timer = rcu_dereference(nattype_refresh_timer);
-	if (nattype_ref_timer)
-		nattype_ref_timer(ct->nattype_entry, ct->timeout);
-#endif
 	return 0;
 }
 
@@ -3145,7 +3128,8 @@ static int ctnetlink_del_expect(struct net *net, struct sock *ctnl,
 
 		if (cda[CTA_EXPECT_ID]) {
 			__be32 id = nla_get_be32(cda[CTA_EXPECT_ID]);
-			if (ntohl(id) != (u32)(unsigned long)exp) {
+
+			if (id != nf_expect_get_id(exp)) {
 				nf_ct_expect_put(exp);
 				return -ENOENT;
 			}

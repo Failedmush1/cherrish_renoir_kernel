@@ -727,7 +727,7 @@ void drm_connector_list_iter_end(struct drm_connector_list_iter *iter)
 		__drm_connector_put_safe(iter->conn);
 		spin_unlock_irqrestore(&config->connector_list_lock, flags);
 	}
-	lock_release(&connector_list_iter_dep_map, _RET_IP_);
+	lock_release(&connector_list_iter_dep_map, 0, _RET_IP_);
 }
 EXPORT_SYMBOL(drm_connector_list_iter_end);
 
@@ -943,6 +943,10 @@ static const struct drm_prop_enum_list dp_colorspaces[] = {
  * 	callback. For atomic drivers the remapping to the "ACTIVE" property is
  * 	implemented in the DRM core.  This is the only standard connector
  * 	property that userspace can change.
+ *
+ * 	On atomic drivers any DPMS setproperty ioctl where the value does not
+ * 	change is completely skipped, otherwise a full atomic commit will occur.
+ * 	On legacy drivers the exact behavior is driver specific.
  *
  * 	Note that this property cannot be set through the MODE_ATOMIC ioctl,
  * 	userspace must use "ACTIVE" on the CRTC instead.

@@ -1796,6 +1796,9 @@ static int __iommu_attach_group(struct iommu_domain *domain,
 {
 	int ret;
 
+	if (group->default_domain && group->domain != group->default_domain)
+		return -EBUSY;
+
 	ret = __iommu_group_for_each_dev(group, domain,
 					 iommu_group_do_attach_device);
 	if (ret == 0)
@@ -1825,18 +1828,28 @@ static int iommu_group_do_detach_device(struct device *dev, void *data)
 	return 0;
 }
 
-/*
- * Although upstream implements detaching the default_domain as a noop,
- * the "SID switch" secure usecase require complete removal of SIDS/SMRS
- * from HLOS iommu registers.
- */
 static void __iommu_detach_group(struct iommu_domain *domain,
 				 struct iommu_group *group)
 {
-	__iommu_group_for_each_dev(group, domain,
+	int ret;
+
+	if (!group->default_domain) {
+		__iommu_group_for_each_dev(group, domain,
 					   iommu_group_do_detach_device);
-	group->domain = NULL;
-	return;
+		group->domain = NULL;
+		return;
+	}
+
+	if (group->domain == group->default_domain)
+		return;
+
+	/* Detach by re-attaching to the default domain */
+	ret = __iommu_group_for_each_dev(group, group->default_domain,
+					 iommu_group_do_attach_device);
+	if (ret != 0)
+		WARN_ON(1);
+	else
+		group->domain = group->default_domain;
 }
 
 void iommu_detach_group(struct iommu_domain *domain, struct iommu_group *group)
@@ -1856,40 +1869,8 @@ phys_addr_t iommu_iova_to_phys(struct iommu_domain *domain, dma_addr_t iova)
 }
 EXPORT_SYMBOL_GPL(iommu_iova_to_phys);
 
-phys_addr_t iommu_iova_to_phys_hard(struct iommu_domain *domain,
-				    dma_addr_t iova, unsigned long trans_flags)
-{
-	struct msm_iommu_ops *ops = to_msm_iommu_ops(domain->ops);
-
-	if (unlikely(ops->iova_to_phys_hard == NULL))
-		return 0;
-
-	return ops->iova_to_phys_hard(domain, iova, trans_flags);
-}
-
-uint64_t iommu_iova_to_pte(struct iommu_domain *domain,
-				    dma_addr_t iova)
-{
-	struct msm_iommu_ops *ops = to_msm_iommu_ops(domain->ops);
-
-	if (unlikely(ops->iova_to_pte == NULL))
-		return 0;
-
-	return ops->iova_to_pte(domain, iova);
-}
-
-bool iommu_is_iova_coherent(struct iommu_domain *domain, dma_addr_t iova)
-{
-	struct msm_iommu_ops *ops = to_msm_iommu_ops(domain->ops);
-
-	if (unlikely(ops->is_iova_coherent == NULL))
-		return false;
-
-	return ops->is_iova_coherent(domain, iova);
-}
-
-size_t iommu_pgsize(unsigned long pgsize_bitmap,
-		    unsigned long addr_merge, size_t size)
+static size_t iommu_pgsize(struct iommu_domain *domain,
+			   unsigned long addr_merge, size_t size)
 {
 	unsigned int pgsize_idx;
 	size_t pgsize;
@@ -1908,14 +1889,10 @@ size_t iommu_pgsize(unsigned long pgsize_bitmap,
 	pgsize = (1UL << (pgsize_idx + 1)) - 1;
 
 	/* throw away page sizes not supported by the hardware */
-	pgsize &= pgsize_bitmap;
+	pgsize &= domain->pgsize_bitmap;
 
 	/* make sure we're still sane */
-	if (!pgsize) {
-		pr_err("invalid pgsize/addr/size! 0x%lx 0x%lx 0x%zx\n",
-		       pgsize_bitmap, addr_merge, size);
-		BUG();
-	}
+	BUG_ON(!pgsize);
 
 	/* pick the biggest page */
 	pgsize_idx = __fls(pgsize);
@@ -1958,8 +1935,7 @@ int iommu_map(struct iommu_domain *domain, unsigned long iova,
 	pr_debug("map: iova 0x%lx pa %pa size 0x%zx\n", iova, &paddr, size);
 
 	while (size) {
-		size_t pgsize = iommu_pgsize(domain->pgsize_bitmap,
-						iova | paddr, size);
+		size_t pgsize = iommu_pgsize(domain, iova | paddr, size);
 
 		pr_debug("mapping: iova 0x%lx pa %pa pgsize 0x%zx\n",
 			 iova, &paddr, pgsize);
@@ -1980,8 +1956,7 @@ int iommu_map(struct iommu_domain *domain, unsigned long iova,
 	if (ret)
 		iommu_unmap(domain, orig_iova, orig_size - size);
 	else
-		trace_map(to_msm_iommu_domain(domain), orig_iova, orig_paddr,
-			  orig_size, prot);
+		trace_map(orig_iova, orig_paddr, orig_size);
 
 	return ret;
 }
@@ -2024,9 +1999,9 @@ static size_t __iommu_unmap(struct iommu_domain *domain,
 	 * or we hit an area that isn't mapped.
 	 */
 	while (unmapped < size) {
-		size_t left = size - unmapped;
+		size_t pgsize = iommu_pgsize(domain, iova, size - unmapped);
 
-		unmapped_page = ops->unmap(domain, iova, left, iotlb_gather);
+		unmapped_page = ops->unmap(domain, iova, pgsize, iotlb_gather);
 		if (!unmapped_page)
 			break;
 
@@ -2037,7 +2012,7 @@ static size_t __iommu_unmap(struct iommu_domain *domain,
 		unmapped += unmapped_page;
 	}
 
-	trace_unmap(to_msm_iommu_domain(domain), orig_iova, size, unmapped);
+	trace_unmap(orig_iova, size, unmapped);
 	return unmapped;
 }
 
@@ -2049,6 +2024,7 @@ size_t iommu_unmap(struct iommu_domain *domain,
 
 	iommu_iotlb_gather_init(&iotlb_gather);
 	ret = __iommu_unmap(domain, iova, size, &iotlb_gather);
+	iommu_tlb_sync(domain, &iotlb_gather);
 
 	return ret;
 }
@@ -2063,19 +2039,6 @@ size_t iommu_unmap_fast(struct iommu_domain *domain,
 EXPORT_SYMBOL_GPL(iommu_unmap_fast);
 
 size_t iommu_map_sg(struct iommu_domain *domain, unsigned long iova,
-		    struct scatterlist *sg, unsigned int nents, int prot)
-{
-	size_t mapped = 0;
-	struct msm_iommu_ops *ops = to_msm_iommu_ops(domain->ops);
-
-	if (ops->map_sg)
-		mapped = ops->map_sg(domain, iova, sg, nents, prot);
-	trace_map_sg(to_msm_iommu_domain(domain), iova, mapped, prot);
-	return mapped;
-}
-EXPORT_SYMBOL_GPL(iommu_map_sg);
-
-size_t default_iommu_map_sg(struct iommu_domain *domain, unsigned long iova,
 		    struct scatterlist *sg, unsigned int nents, int prot)
 {
 	size_t len = 0, mapped = 0;
@@ -2115,7 +2078,7 @@ out_err:
 	return 0;
 
 }
-EXPORT_SYMBOL(default_iommu_map_sg);
+EXPORT_SYMBOL_GPL(iommu_map_sg);
 
 int iommu_domain_window_enable(struct iommu_domain *domain, u32 wnd_nr,
 			       phys_addr_t paddr, u64 size, int prot)

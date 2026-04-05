@@ -5,10 +5,6 @@ SUBLEVEL = 302
 EXTRAVERSION =
 NAME = Kleptomaniac Octopus
 
-# indicate that change "Kbuild: Support nested composite objects" is
-# present in the kernel so that out-of-tree modules can act upon it
-export KERNEL_SUPPORTS_NESTED_COMPOSITES := y
-
 # *DOCUMENTATION*
 # To see a list of typical targets execute "make help"
 # More info can be located in ./README
@@ -558,47 +554,33 @@ ifdef building_out_of_srctree
 	{ echo "# this is build directory, ignore it"; echo "*"; } > .gitignore
 endif
 
+ifneq ($(shell $(CC) --version 2>&1 | head -n 1 | grep clang),)
+ifneq ($(CROSS_COMPILE),)
+CLANG_TRIPLE	?= $(CROSS_COMPILE)
+CLANG_FLAGS	+= --target=$(notdir $(CLANG_TRIPLE:%-=%))
+ifeq ($(shell $(srctree)/scripts/clang-android.sh $(CC) $(CLANG_FLAGS)), y)
+$(error "Clang with Android --target detected. Did you specify CLANG_TRIPLE?")
+endif
+GCC_TOOLCHAIN_DIR := $(dir $(shell which $(CROSS_COMPILE)elfedit))
+CLANG_FLAGS	+= --prefix=$(GCC_TOOLCHAIN_DIR)$(notdir $(CROSS_COMPILE))
+GCC_TOOLCHAIN	:= $(realpath $(GCC_TOOLCHAIN_DIR)/..)
+endif
+ifneq ($(GCC_TOOLCHAIN),)
+CLANG_FLAGS	+= --gcc-toolchain=$(GCC_TOOLCHAIN)
+endif
+ifneq ($(LLVM_IAS),1)
+CLANG_FLAGS	+= -no-integrated-as
+endif
+CLANG_FLAGS	+= -Werror=unknown-warning-option
+KBUILD_CPPFLAGS	+= $(CLANG_FLAGS)
+export CLANG_FLAGS
+endif
+
 # The expansion should be delayed until arch/$(SRCARCH)/Makefile is included.
 # Some architectures define CROSS_COMPILE in arch/$(SRCARCH)/Makefile.
 # CC_VERSION_TEXT is referenced from Kconfig (so it needs export),
 # and from include/config/auto.conf.cmd to detect the compiler upgrade.
-CC_VERSION_TEXT = $(shell $(CC) --version 2>/dev/null | head -n 1 | sed 's/\#//g')
-
-ifneq ($(findstring clang,$(CC_VERSION_TEXT)),)
-# Individual arch/{arch}/Makefiles should use -EL/-EB to set intended
-# endianness and -m32/-m64 to set word size based on Kconfigs instead of
-# relying on the target triple.
-CLANG_TARGET_FLAGS_arm		:= arm-linux-gnueabi
-CLANG_TARGET_FLAGS_arm64	:= aarch64-linux-gnu
-CLANG_TARGET_FLAGS_hexagon	:= hexagon-linux-musl
-CLANG_TARGET_FLAGS_m68k		:= m68k-linux-gnu
-CLANG_TARGET_FLAGS_mips		:= mipsel-linux-gnu
-CLANG_TARGET_FLAGS_powerpc	:= powerpc64le-linux-gnu
-CLANG_TARGET_FLAGS_riscv	:= riscv64-linux-gnu
-CLANG_TARGET_FLAGS_s390		:= s390x-linux-gnu
-CLANG_TARGET_FLAGS_x86		:= x86_64-linux-gnu
-CLANG_TARGET_FLAGS		:= $(CLANG_TARGET_FLAGS_$(SRCARCH))
-
-ifeq ($(CROSS_COMPILE),)
-ifeq ($(CLANG_TARGET_FLAGS),)
-$(error Specify CROSS_COMPILE or add '--target=' option to Makefile)
-else
-CLANG_FLAGS	+= --target=$(CLANG_TARGET_FLAGS)
-endif # CLANG_TARGET_FLAGS
-else
-CLANG_FLAGS	+= --target=$(notdir $(CROSS_COMPILE:%-=%))
-endif # CROSS_COMPILE
-
-ifeq ($(LLVM_IAS),0)
-CLANG_FLAGS	+= -no-integrated-as
-GCC_TOOLCHAIN_DIR := $(dir $(shell which $(CROSS_COMPILE)elfedit))
-CLANG_FLAGS	+= --prefix=$(GCC_TOOLCHAIN_DIR)$(notdir $(CROSS_COMPILE))
-endif
-CLANG_FLAGS	+= -Werror=unknown-warning-option
-KBUILD_CFLAGS	+= $(CLANG_FLAGS)
-KBUILD_AFLAGS	+= $(CLANG_FLAGS)
-export CLANG_FLAGS
-endif
+CC_VERSION_TEXT = $(shell $(CC) --version 2>/dev/null | head -n 1)
 
 ifdef config-build
 # ===========================================================================
@@ -663,7 +645,7 @@ endif
 ifeq ($(KBUILD_EXTMOD),)
 # Objects we will link into vmlinux / subdirs we need to visit
 init-y		:= init/
-drivers-y	:= drivers/ sound/ techpack/
+drivers-y	:= drivers/ sound/
 drivers-$(CONFIG_SAMPLES) += samples/
 net-y		:= net/
 libs-y		:= lib/
@@ -797,7 +779,22 @@ KBUILD_CFLAGS += -Wno-format-invalid-specifier
 KBUILD_CFLAGS += -Wno-gnu
 # Quiet clang warning: comparison of unsigned expression < 0 is always false
 KBUILD_CFLAGS += -Wno-tautological-compare
-KBUILD_CFLAGS += $(call cc-disable-warning, undefined-optimized)
+# CLANG uses a _MergedGlobals as optimization, but this breaks modpost, as the
+# source of a reference will be _MergedGlobals and not on of the whitelisted names.
+# See modpost pattern 2
+KBUILD_CFLAGS += -mno-global-merge
+
+# Clang may emit a warning when a const variable, such as the dummy variables
+# in typecheck(), or const member of an aggregate type are not initialized,
+# which can result in unexpected behavior. However, in many audited cases of
+# the "field" variant of the warning, this is intentional because the field is
+# never used within a particular call path, the field is within a union with
+# other non-const members, or the containing object is not const so the field
+# can be modified via memcpy() / memset(). While the variable warning also gets
+# disabled with this same switch, there should not be too much coverage lost
+# because -Wuninitialized will still flag when an uninitialized const variable
+# is used.
+KBUILD_CFLAGS += $(call cc-disable-warning, default-const-init-unsafe)
 else
 
 # Warn about unmarked fall-throughs in switch statement.
@@ -1017,6 +1014,9 @@ KBUILD_CFLAGS   += $(call cc-option,-Werror=incompatible-pointer-types)
 # Require designated initializers for all marked structures
 KBUILD_CFLAGS   += $(call cc-option,-Werror=designated-init)
 
+# Ensure compilers do not transform certain loops into calls to wcslen()
+KBUILD_CFLAGS += -fno-builtin-wcslen
+
 # change __FILE__ to the relative path from the srctree
 KBUILD_CFLAGS	+= $(call cc-option,-fmacro-prefix-map=$(srctree)/=)
 
@@ -1041,6 +1041,11 @@ endif
 
 ifeq ($(CONFIG_RELR),y)
 LDFLAGS_vmlinux	+= --pack-dyn-relocs=relr --use-android-relr-tags
+endif
+
+# userspace programs are linked via the compiler, use the correct linker
+ifeq ($(CONFIG_CC_IS_CLANG)$(CONFIG_LD_IS_LLD),yy)
+KBUILD_USERLDFLAGS += $(call cc-option, --ld-path=$(LD))
 endif
 
 # make the checker run with the right architecture
@@ -1332,26 +1337,17 @@ PHONY += archheaders archscripts
 
 hdr-inst := -f $(srctree)/scripts/Makefile.headersinst obj
 
-techpack-dirs := $(shell find $(srctree)/techpack -maxdepth 1 -mindepth 1 -type d -not -name ".*")
-techpack-dirs := $(subst $(srctree)/,,$(techpack-dirs))
-
 PHONY += headers
 headers: $(version_h) scripts_unifdef uapi-asm-generic archheaders archscripts
 	$(if $(wildcard $(srctree)/arch/$(SRCARCH)/include/uapi/asm/Kbuild),, \
 	  $(error Headers not exportable for the $(SRCARCH) architecture))
 	$(Q)$(MAKE) $(hdr-inst)=include/uapi
 	$(Q)$(MAKE) $(hdr-inst)=arch/$(SRCARCH)/include/uapi
-	$(Q)for d in $(techpack-dirs); do \
-		$(MAKE) $(hdr-inst)=$$d/include/uapi; \
-	done
 
 # Deprecated. It is no-op now.
 PHONY += headers_check
 headers_check:
 	@:
-	$(Q)for d in $(techpack-dirs); do \
-		$(MAKE) $(hdr-inst)=$$d/include/uapi HDRCHECK=1; \
-	done
 
 ifdef CONFIG_HEADERS_INSTALL
 prepare: headers
@@ -1442,10 +1438,6 @@ endif
 
 PHONY += modules
 modules: $(if $(KBUILD_BUILTIN),vmlinux) modules.order modules.builtin
-ifdef CONFIG_TRIM_UNUSED_KSYMS
-	$(Q)$(CONFIG_SHELL) $(srctree)/scripts/adjust_autoksyms.sh \
-	  "$(MAKE) -f $(srctree)/Makefile vmlinux"
-endif
 	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.modpost
 	$(Q)$(CONFIG_SHELL) $(srctree)/scripts/modules-check.sh
 

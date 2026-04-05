@@ -37,7 +37,7 @@ static HLIST_HEAD(clk_root_list);
 static HLIST_HEAD(clk_orphan_list);
 static LIST_HEAD(clk_notifier_list);
 
-static struct hlist_head *all_lists[] = {
+static const struct hlist_head *all_lists[] = {
 	&clk_root_list,
 	&clk_orphan_list,
 	NULL,
@@ -426,6 +426,9 @@ static struct clk_core *clk_core_get(struct clk_core *core, u8 p_index)
 
 	if (IS_ERR(hw))
 		return ERR_CAST(hw);
+
+	if (!hw)
+		return NULL;
 
 	return hw->core;
 }
@@ -1321,6 +1324,8 @@ static int clk_disable_unused(void)
 		pr_warn("clk: Not disabling unused clocks\n");
 		return 0;
 	}
+
+	pr_info("clk: Disabling unused clocks\n");
 
 	clk_prepare_lock();
 
@@ -2582,7 +2587,7 @@ static int clk_core_set_parent_nolock(struct clk_core *core,
 	if (!core)
 		return 0;
 
-	if (core->parent == parent && !(core->flags & CLK_IS_MEASURE))
+	if (core->parent == parent)
 		return 0;
 
 	/* verify ops for multi-parent clks */
@@ -3256,76 +3261,6 @@ static int clk_max_rate_show(struct seq_file *s, void *data)
 }
 DEFINE_SHOW_ATTRIBUTE(clk_max_rate);
 
-static int clock_debug_rate_set(void *data, u64 val)
-{
-	struct clk_core *core = data;
-	int ret;
-
-	ret = clk_set_rate(core->hw->clk, val);
-	if (ret)
-		pr_err("clk_set_rate(%lu) failed (%d)\n",
-				(unsigned long)val, ret);
-
-	return ret;
-}
-
-static int clock_debug_rate_get(void *data, u64 *val)
-{
-	struct clk_core *core = data;
-
-	*val = clk_get_rate(core->hw->clk);
-
-	return 0;
-}
-
-DEFINE_DEBUGFS_ATTRIBUTE(clock_rate_fops, clock_debug_rate_get,
-			clock_debug_rate_set, "%llu\n");
-
-static ssize_t clock_parent_read(struct file *filp, char __user *ubuf,
-		size_t cnt, loff_t *ppos)
-{
-	char name[256] = {0};
-	struct clk_core *core = filp->private_data;
-	struct clk_core *p = core->hw->core->parent;
-
-	snprintf(name, sizeof(name), "%s\n", p ? p->name : "None\n");
-
-	return simple_read_from_buffer(ubuf, cnt, ppos, name, strlen(name));
-}
-
-static const struct file_operations clock_parent_fops = {
-	.open		= simple_open,
-	.read		= clock_parent_read,
-};
-
-static int clock_debug_enable_set(void *data, u64 val)
-{
-	struct clk_core *core = data;
-	int rc = 0;
-
-	if (val)
-		rc = clk_prepare_enable(core->hw->clk);
-	else
-		clk_disable_unprepare(core->hw->clk);
-
-	return rc;
-}
-
-static int clock_debug_enable_get(void *data, u64 *val)
-{
-	struct clk_core *core = data;
-	int enabled = 0;
-
-	enabled = core->enable_count;
-
-	*val = enabled;
-
-	return 0;
-}
-
-DEFINE_DEBUGFS_ATTRIBUTE(clock_enable_fops, clock_debug_enable_get,
-			clock_debug_enable_set, "%lld\n");
-
 static void clk_debug_create_one(struct clk_core *core, struct dentry *pdentry)
 {
 	struct dentry *root;
@@ -3336,15 +3271,14 @@ static void clk_debug_create_one(struct clk_core *core, struct dentry *pdentry)
 	root = debugfs_create_dir(core->name, pdentry);
 	core->dentry = root;
 
-	debugfs_create_file("clk_rate", 0444, root, core, &clock_rate_fops);
+	debugfs_create_ulong("clk_rate", 0444, root, &core->rate);
 	debugfs_create_file("clk_min_rate", 0444, root, core, &clk_min_rate_fops);
 	debugfs_create_file("clk_max_rate", 0444, root, core, &clk_max_rate_fops);
 	debugfs_create_ulong("clk_accuracy", 0444, root, &core->accuracy);
 	debugfs_create_u32("clk_phase", 0444, root, &core->phase);
 	debugfs_create_file("clk_flags", 0444, root, core, &clk_flags_fops);
 	debugfs_create_u32("clk_prepare_count", 0444, root, &core->prepare_count);
-	debugfs_create_file("clk_enable_count", 0444, root, core,
-			    &clock_enable_fops);
+	debugfs_create_u32("clk_enable_count", 0444, root, &core->enable_count);
 	debugfs_create_u32("clk_protect_count", 0444, root, &core->protect_count);
 	debugfs_create_u32("clk_notifier_count", 0444, root, &core->notifier_count);
 	debugfs_create_file("clk_duty_cycle", 0444, root, core,
@@ -3396,162 +3330,6 @@ static void clk_debug_unregister(struct clk_core *core)
 	mutex_unlock(&clk_debug_lock);
 }
 
-#ifdef CONFIG_COMMON_CLK_QCOM_DEBUG
-#define clock_debug_output(m, c, fmt, ...)		\
-do {							\
-	if (m)						\
-		seq_printf(m, fmt, ##__VA_ARGS__);	\
-	else if (c)					\
-		pr_cont(fmt, ##__VA_ARGS__);		\
-	else						\
-		pr_info(fmt, ##__VA_ARGS__);		\
-} while (0)
-
-static int clock_debug_print_clock(struct clk_core *c, struct seq_file *s)
-{
-	char *start = "\t";
-	struct clk *clk;
-
-	if (!c || !c->prepare_count)
-		return 0;
-
-	clock_debug_output(s, 0, "    ");
-
-	clk = c->hw->clk;
-
-	do {
-		c = clk->core;
-		if (c->ops->list_rate_vdd_level)
-			clock_debug_output(s, 1, "%s%s:%u:%u [%ld, %d]", start,
-				c->name,
-				c->prepare_count,
-				c->enable_count,
-				c->rate,
-				c->ops->list_rate_vdd_level(c->hw, c->rate));
-		else
-			clock_debug_output(s, 1, "%s%s:%u:%u [%ld]", start,
-				c->name,
-				c->prepare_count,
-				c->enable_count,
-				c->rate);
-		start = " -> ";
-	} while ((clk = clk_get_parent(clk)));
-
-	clock_debug_output(s, 1, "\n");
-
-	return 1;
-}
-
-/*
- * clock_debug_print_enabled_clocks() - Print names of enabled clocks
- */
-static void clock_debug_print_enabled_clocks(struct seq_file *s)
-{
-	struct clk_core *core;
-	int cnt = 0;
-
-	clock_debug_output(s, 0, "Enabled clocks:\n");
-
-	hlist_for_each_entry(core, &clk_debug_list, debug_node)
-		cnt += clock_debug_print_clock(core, s);
-
-	if (cnt)
-		clock_debug_output(s, 0, "Enabled clock count: %d\n", cnt);
-	else
-		clock_debug_output(s, 0, "No clocks enabled.\n");
-}
-
-static int enabled_clocks_show(struct seq_file *s, void *unused)
-{
-	mutex_lock(&clk_debug_lock);
-
-	clock_debug_print_enabled_clocks(s);
-
-	mutex_unlock(&clk_debug_lock);
-
-	return 0;
-}
-
-static int enabled_clocks_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, enabled_clocks_show, inode->i_private);
-}
-
-static const struct file_operations clk_enabled_list_fops = {
-	.open		= enabled_clocks_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= seq_release,
-};
-
-static u32 debug_suspend;
-
-/*
- * Print the names of all enabled clocks and their parents if
- * debug_suspend is set from debugfs.
- */
-void clock_debug_print_enabled(void)
-{
-	if (likely(!debug_suspend))
-		return;
-
-	if (!mutex_trylock(&clk_debug_lock))
-		return;
-
-	clock_debug_print_enabled_clocks(NULL);
-
-	mutex_unlock(&clk_debug_lock);
-}
-EXPORT_SYMBOL(clock_debug_print_enabled);
-
-static void clk_state_subtree(struct clk_core *c)
-{
-	int vdd_level = 0;
-	struct clk_core *child;
-
-	if (!c)
-		return;
-
-	if (c->ops->list_rate_vdd_level)
-		vdd_level = c->ops->list_rate_vdd_level(c->hw, c->rate);
-
-	trace_clk_state(c->name, c->prepare_count, c->enable_count,
-						c->rate, vdd_level);
-
-	hlist_for_each_entry(child, &c->children, child_node)
-		clk_state_subtree(child);
-}
-
-static int clk_state_show(struct seq_file *s, void *data)
-{
-	struct clk_core *c;
-	struct hlist_head **lists = (struct hlist_head **)s->private;
-
-	clk_prepare_lock();
-
-	for (; *lists; lists++)
-		hlist_for_each_entry(c, *lists, child_node)
-			clk_state_subtree(c);
-
-	clk_prepare_unlock();
-
-	return 0;
-}
-
-
-static int clk_state_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, clk_state_show, inode->i_private);
-}
-
-static const struct file_operations clk_state_fops = {
-	.open		= clk_state_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
-};
-#endif
-
 /**
  * clk_debug_init - lazily populate the debugfs clk directory
  *
@@ -3575,14 +3353,6 @@ static int __init clk_debug_init(void)
 			    &clk_summary_fops);
 	debugfs_create_file("clk_orphan_dump", 0444, rootdir, &orphan_list,
 			    &clk_dump_fops);
-
-#ifdef CONFIG_COMMON_CLK_QCOM_DEBUG
-	debugfs_create_file("clk_enabled_list", 0444, rootdir,
-			    &clk_debug_list, &clk_enabled_list_fops);
-	debugfs_create_u32("debug_suspend", 0644, rootdir, &debug_suspend);
-	debugfs_create_file("trace_clocks", 0444, rootdir, &all_lists,
-			    &clk_state_fops);
-#endif
 
 	mutex_lock(&clk_debug_lock);
 	hlist_for_each_entry(core, &clk_debug_list, debug_node)
@@ -3822,8 +3592,6 @@ static int __clk_core_init(struct clk_core *core)
 
 	clk_core_hold_state(core);
 	clk_core_reparent_orphans_nolock();
-
-	kref_init(&core->ref);
 out:
 	clk_pm_runtime_put(core);
 unlock:
@@ -4033,6 +3801,16 @@ static void clk_core_free_parent_map(struct clk_core *core)
 	kfree(core->parents);
 }
 
+/* Free memory allocated for a struct clk_core */
+static void __clk_release(struct kref *ref)
+{
+	struct clk_core *core = container_of(ref, struct clk_core, ref);
+
+	clk_core_free_parent_map(core);
+	kfree_const(core->name);
+	kfree(core);
+}
+
 static struct clk *
 __clk_register(struct device *dev, struct device_node *np, struct clk_hw *hw)
 {
@@ -4052,6 +3830,8 @@ __clk_register(struct device *dev, struct device_node *np, struct clk_hw *hw)
 		ret = -ENOMEM;
 		goto fail_out;
 	}
+
+	kref_init(&core->ref);
 
 	core->name = kstrdup_const(init->name, GFP_KERNEL);
 	if (!core->name) {
@@ -4107,12 +3887,10 @@ __clk_register(struct device *dev, struct device_node *np, struct clk_hw *hw)
 	hw->clk = NULL;
 
 fail_create_clk:
-	clk_core_free_parent_map(core);
 fail_parents:
 fail_ops:
-	kfree_const(core->name);
 fail_name:
-	kfree(core);
+	kref_put(&core->ref, __clk_release);
 fail_out:
 	return ERR_PTR(ret);
 }
@@ -4192,18 +3970,6 @@ int of_clk_hw_register(struct device_node *node, struct clk_hw *hw)
 }
 EXPORT_SYMBOL_GPL(of_clk_hw_register);
 
-/* Free memory allocated for a clock. */
-static void __clk_release(struct kref *ref)
-{
-	struct clk_core *core = container_of(ref, struct clk_core, ref);
-
-	lockdep_assert_held(&prepare_lock);
-
-	clk_core_free_parent_map(core);
-	kfree_const(core->name);
-	kfree(core);
-}
-
 /*
  * Empty clk_ops for unregistered clocks. These are used temporarily
  * after clk_unregister() was called on a clock and until last clock
@@ -4256,7 +4022,7 @@ static void clk_core_evict_parent_cache_subtree(struct clk_core *root,
 /* Remove this clk from all parent caches */
 static void clk_core_evict_parent_cache(struct clk_core *core)
 {
-	struct hlist_head **lists;
+	const struct hlist_head **lists;
 	struct clk_core *root;
 
 	lockdep_assert_held(&prepare_lock);
@@ -4285,7 +4051,8 @@ void clk_unregister(struct clk *clk)
 	if (clk->core->ops == &clk_nodrv_ops) {
 		pr_err("%s: unregistered clock: %s\n", __func__,
 		       clk->core->name);
-		goto unlock;
+		clk_prepare_unlock();
+		return;
 	}
 	/*
 	 * Assign empty clock ops for consumers that might still hold
@@ -4316,11 +4083,10 @@ void clk_unregister(struct clk *clk)
 	if (clk->core->protect_count)
 		pr_warn("%s: unregistering protected clock: %s\n",
 					__func__, clk->core->name);
+	clk_prepare_unlock();
 
 	kref_put(&clk->core->ref, __clk_release);
 	free_clk(clk);
-unlock:
-	clk_prepare_unlock();
 }
 EXPORT_SYMBOL_GPL(clk_unregister);
 
@@ -4482,13 +4248,11 @@ void __clk_put(struct clk *clk)
 	    clk->max_rate < clk->core->req_rate)
 		clk_core_set_rate_nolock(clk->core, clk->core->req_rate);
 
-	owner = clk->core->owner;
-	kref_put(&clk->core->ref, __clk_release);
-
 	clk_prepare_unlock();
 
+	owner = clk->core->owner;
+	kref_put(&clk->core->ref, __clk_release);
 	module_put(owner);
-
 	free_clk(clk);
 }
 
@@ -4952,6 +4716,10 @@ of_clk_get_hw_from_clkspec(struct of_phandle_args *clkspec)
 
 	if (!clkspec)
 		return ERR_PTR(-EINVAL);
+
+	/* Check if node in clkspec is in disabled/fail state */
+	if (!of_device_is_available(clkspec->np))
+		return ERR_PTR(-ENOENT);
 
 	mutex_lock(&of_clk_mutex);
 	list_for_each_entry(provider, &of_clk_providers, link) {

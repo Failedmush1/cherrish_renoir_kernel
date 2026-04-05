@@ -261,7 +261,7 @@ __bad_area(struct pt_regs *regs, unsigned long error_code,
 	 * Something tried to access memory that isn't in our memory map..
 	 * Fix it, but check if it's kernel or user first..
 	 */
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 
 	__bad_area_nosemaphore(regs, error_code, address, si_code);
 }
@@ -285,7 +285,7 @@ do_sigbus(struct pt_regs *regs, unsigned long error_code, unsigned long address)
 	struct task_struct *tsk = current;
 	struct mm_struct *mm = tsk->mm;
 
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 
 	/* Kernel mode? Handle exceptions or die: */
 	if (!user_mode(regs))
@@ -300,16 +300,15 @@ mm_fault_error(struct pt_regs *regs, unsigned long error_code,
 {
 	/*
 	 * Pagefault was interrupted by SIGKILL. We have no reason to
+	 * continue pagefault.
 	 */
-	if (fault_signal_pending(fault, regs)) {
+	if (fatal_signal_pending(current)) {
+		if (!(fault & VM_FAULT_RETRY))
+			up_read(&current->mm->mmap_sem);
 		if (!user_mode(regs))
 			no_context(regs, error_code, address);
 		return 1;
 	}
-
-	/* Release mmap_sem first if necessary */
-	if (!(fault & VM_FAULT_RETRY))
-		mmap_read_unlock(current->mm);
 
 	if (!(fault & VM_FAULT_ERROR))
 		return 0;
@@ -317,9 +316,11 @@ mm_fault_error(struct pt_regs *regs, unsigned long error_code,
 	if (fault & VM_FAULT_OOM) {
 		/* Kernel mode? Handle exceptions or die: */
 		if (!user_mode(regs)) {
+			up_read(&current->mm->mmap_sem);
 			no_context(regs, error_code, address);
 			return 1;
 		}
+		up_read(&current->mm->mmap_sem);
 
 		/*
 		 * We ran out of memory, call the OOM killer, and return the
@@ -379,7 +380,7 @@ asmlinkage void __kprobes do_page_fault(struct pt_regs *regs,
 	struct mm_struct *mm;
 	struct vm_area_struct * vma;
 	vm_fault_t fault;
-	unsigned int flags = FAULT_FLAG_DEFAULT;
+	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
 
 	tsk = current;
 	mm = tsk->mm;
@@ -423,7 +424,7 @@ asmlinkage void __kprobes do_page_fault(struct pt_regs *regs,
 	}
 
 retry:
-	mmap_read_lock(mm);
+	down_read(&mm->mmap_sem);
 
 	vma = find_vma(mm, address);
 	if (unlikely(!vma)) {
@@ -480,6 +481,7 @@ good_area:
 				      regs, address);
 		}
 		if (fault & VM_FAULT_RETRY) {
+			flags &= ~FAULT_FLAG_ALLOW_RETRY;
 			flags |= FAULT_FLAG_TRIED;
 
 			/*
@@ -491,5 +493,5 @@ good_area:
 		}
 	}
 
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 }

@@ -191,38 +191,6 @@ static void move_ptes(struct vm_area_struct *vma, pmd_t *old_pmd,
 		drop_rmap_locks(vma);
 }
 
-#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
-static inline bool trylock_vma_ref_count(struct vm_area_struct *vma)
-{
-	/*
-	 * If we have the only reference, swap the refcount to -1. This
-	 * will prevent other concurrent references by get_vma() for SPFs.
-	 */
-	return atomic_cmpxchg(&vma->vm_ref_count, 1, -1) == 1;
-}
-
-/*
- * Restore the VMA reference count to 1 after a fast mremap.
- */
-static inline void unlock_vma_ref_count(struct vm_area_struct *vma)
-{
-	/*
-	 * This should only be called after a corresponding,
-	 * successful trylock_vma_ref_count().
-	 */
-	VM_BUG_ON_VMA(atomic_cmpxchg(&vma->vm_ref_count, -1, 1) != -1,
-		      vma);
-}
-#else	/* !CONFIG_SPECULATIVE_PAGE_FAULT */
-static inline bool trylock_vma_ref_count(struct vm_area_struct *vma)
-{
-	return true;
-}
-static inline void unlock_vma_ref_count(struct vm_area_struct *vma)
-{
-}
-#endif	/* CONFIG_SPECULATIVE_PAGE_FAULT */
-
 #ifdef CONFIG_HAVE_MOVE_PMD
 static bool move_normal_pmd(struct vm_area_struct *vma, unsigned long old_addr,
 		  unsigned long new_addr, unsigned long old_end,
@@ -241,14 +209,6 @@ static bool move_normal_pmd(struct vm_area_struct *vma, unsigned long old_addr,
 	 * should have release it.
 	 */
 	if (WARN_ON(!pmd_none(*new_pmd)))
-		return false;
-
-	/*
-	 * We hold both exclusive mmap_lock and rmap_lock at this point and
-	 * cannot block. If we cannot immediately take exclusive ownership
-	 * of the VMA fallback to the move_ptes().
-	 */
-	if (!trylock_vma_ref_count(vma))
 		return false;
 
 	/*
@@ -273,7 +233,6 @@ static bool move_normal_pmd(struct vm_area_struct *vma, unsigned long old_addr,
 		spin_unlock(new_ptl);
 	spin_unlock(old_ptl);
 
-	unlock_vma_ref_count(vma);
 	return true;
 }
 #endif
@@ -360,8 +319,8 @@ unsigned long move_page_tables(struct vm_area_struct *vma,
 static unsigned long move_vma(struct vm_area_struct *vma,
 		unsigned long old_addr, unsigned long old_len,
 		unsigned long new_len, unsigned long new_addr,
-		bool *locked, unsigned long flags,
-		struct vm_userfaultfd_ctx *uf, struct list_head *uf_unmap)
+		bool *locked, struct vm_userfaultfd_ctx *uf,
+		struct list_head *uf_unmap)
 {
 	struct mm_struct *mm = vma->vm_mm;
 	struct vm_area_struct *new_vma;
@@ -399,14 +358,6 @@ static unsigned long move_vma(struct vm_area_struct *vma,
 	if (!new_vma)
 		return -ENOMEM;
 
-	/* new_vma is returned protected by copy_vma, to prevent speculative
-	 * page fault to be done in the destination area before we move the pte.
-	 * Now, we must also protect the source VMA since we don't want pages
-	 * to be mapped in our back while we are copying the PTEs.
-	 */
-	if (vma != new_vma)
-		vm_write_begin(vma);
-
 	moved_len = move_page_tables(vma, old_addr, new_vma, new_addr, old_len,
 				     need_rmap_locks);
 	if (moved_len < old_len) {
@@ -423,8 +374,6 @@ static unsigned long move_vma(struct vm_area_struct *vma,
 		 */
 		move_page_tables(new_vma, new_addr, vma, old_addr, moved_len,
 				 true);
-		if (vma != new_vma)
-			vm_write_end(vma);
 		vma = new_vma;
 		old_len = new_len;
 		old_addr = new_addr;
@@ -433,10 +382,7 @@ static unsigned long move_vma(struct vm_area_struct *vma,
 		mremap_userfaultfd_prep(new_vma, uf);
 		arch_remap(mm, old_addr, old_addr + old_len,
 			   new_addr, new_addr + new_len);
-		if (vma != new_vma)
-			vm_write_end(vma);
 	}
-	vm_write_end(new_vma);
 
 	/* Conceal VM_ACCOUNT so old reservation is not undone */
 	if (vm_flags & VM_ACCOUNT) {
@@ -463,43 +409,11 @@ static unsigned long move_vma(struct vm_area_struct *vma,
 	if (unlikely(vma->vm_flags & VM_PFNMAP))
 		untrack_pfn_moved(vma);
 
-	if (unlikely(!err && (flags & MREMAP_DONTUNMAP))) {
-		if (vm_flags & VM_ACCOUNT) {
-			/* Always put back VM_ACCOUNT since we won't unmap */
-			vma->vm_flags |= VM_ACCOUNT;
-
-			vm_acct_memory(new_len >> PAGE_SHIFT);
-		}
-
-		/*
-		 * VMAs can actually be merged back together in copy_vma
-		 * calling merge_vma. This can happen with anonymous vmas
-		 * which have not yet been faulted, so if we were to consider
-		 * this VMA split we'll end up adding VM_ACCOUNT on the
-		 * next VMA, which is completely unrelated if this VMA
-		 * was re-merged.
-		 */
-		if (split && new_vma == vma)
-			split = 0;
-
-		/* We always clear VM_LOCKED[ONFAULT] on the old vma */
-		vma->vm_flags &= VM_LOCKED_CLEAR_MASK;
-
-		/* Because we won't unmap we don't need to touch locked_vm */
-		goto out;
-	}
-
 	if (do_munmap(mm, old_addr, old_len, uf_unmap) < 0) {
 		/* OOM: unable to split vma, just get accounts right */
 		vm_unacct_memory(excess >> PAGE_SHIFT);
 		excess = 0;
 	}
-
-	if (vm_flags & VM_LOCKED) {
-		mm->locked_vm += new_len >> PAGE_SHIFT;
-		*locked = true;
-	}
-out:
 	mm->hiwater_vm = hiwater_vm;
 
 	/* Restore VM_ACCOUNT if one or two pieces of vma left */
@@ -509,12 +423,16 @@ out:
 			vma->vm_next->vm_flags |= VM_ACCOUNT;
 	}
 
+	if (vm_flags & VM_LOCKED) {
+		mm->locked_vm += new_len >> PAGE_SHIFT;
+		*locked = true;
+	}
+
 	return new_addr;
 }
 
 static struct vm_area_struct *vma_to_resize(unsigned long addr,
-	unsigned long old_len, unsigned long new_len, unsigned long flags,
-	unsigned long *p)
+	unsigned long old_len, unsigned long new_len, unsigned long *p)
 {
 	struct mm_struct *mm = current->mm;
 	struct vm_area_struct *vma = find_vma(mm, addr);
@@ -535,10 +453,6 @@ static struct vm_area_struct *vma_to_resize(unsigned long addr,
 		pr_warn_once("%s (%d): attempted to duplicate a private mapping with mremap.  This is not supported.\n", current->comm, current->pid);
 		return ERR_PTR(-EINVAL);
 	}
-
-	if ((flags & MREMAP_DONTUNMAP) &&
-			(vma->vm_flags & (VM_DONTEXPAND | VM_PFNMAP)))
-		return ERR_PTR(-EINVAL);
 
 	if (is_vm_hugetlb_page(vma))
 		return ERR_PTR(-EINVAL);
@@ -584,7 +498,7 @@ static struct vm_area_struct *vma_to_resize(unsigned long addr,
 
 static unsigned long mremap_to(unsigned long addr, unsigned long old_len,
 		unsigned long new_addr, unsigned long new_len, bool *locked,
-		unsigned long flags, struct vm_userfaultfd_ctx *uf,
+		struct vm_userfaultfd_ctx *uf,
 		struct list_head *uf_unmap_early,
 		struct list_head *uf_unmap)
 {
@@ -592,7 +506,7 @@ static unsigned long mremap_to(unsigned long addr, unsigned long old_len,
 	struct vm_area_struct *vma;
 	unsigned long ret = -EINVAL;
 	unsigned long charged = 0;
-	unsigned long map_flags = 0;
+	unsigned long map_flags;
 
 	if (offset_in_page(new_addr))
 		goto out;
@@ -621,11 +535,9 @@ static unsigned long mremap_to(unsigned long addr, unsigned long old_len,
 	if ((mm->map_count + 2) >= sysctl_max_map_count - 3)
 		return -ENOMEM;
 
-	if (flags & MREMAP_FIXED) {
-		ret = do_munmap(mm, new_addr, new_len, uf_unmap_early);
-		if (ret)
-			goto out;
-	}
+	ret = do_munmap(mm, new_addr, new_len, uf_unmap_early);
+	if (ret)
+		goto out;
 
 	if (old_len >= new_len) {
 		ret = do_munmap(mm, addr+new_len, old_len - new_len, uf_unmap);
@@ -634,22 +546,13 @@ static unsigned long mremap_to(unsigned long addr, unsigned long old_len,
 		old_len = new_len;
 	}
 
-	vma = vma_to_resize(addr, old_len, new_len, flags, &charged);
+	vma = vma_to_resize(addr, old_len, new_len, &charged);
 	if (IS_ERR(vma)) {
 		ret = PTR_ERR(vma);
 		goto out;
 	}
 
-	/* MREMAP_DONTUNMAP expands by old_len since old_len == new_len */
-	if (flags & MREMAP_DONTUNMAP &&
-		!may_expand_vm(mm, vma->vm_flags, old_len >> PAGE_SHIFT)) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	if (flags & MREMAP_FIXED)
-		map_flags |= MAP_FIXED;
-
+	map_flags = MAP_FIXED;
 	if (vma->vm_flags & VM_MAYSHARE)
 		map_flags |= MAP_SHARED;
 
@@ -659,16 +562,10 @@ static unsigned long mremap_to(unsigned long addr, unsigned long old_len,
 	if (offset_in_page(ret))
 		goto out1;
 
-	/* We got a new mapping */
-	if (!(flags & MREMAP_FIXED))
-		new_addr = ret;
-
-	ret = move_vma(vma, addr, old_len, new_len, new_addr, locked, flags, uf,
+	ret = move_vma(vma, addr, old_len, new_len, new_addr, locked, uf,
 		       uf_unmap);
-
 	if (!(offset_in_page(ret)))
 		goto out;
-
 out1:
 	vm_unacct_memory(charged);
 
@@ -722,20 +619,11 @@ SYSCALL_DEFINE5(mremap, unsigned long, addr, unsigned long, old_len,
 	 */
 	addr = untagged_addr(addr);
 
-	if (flags & ~(MREMAP_FIXED | MREMAP_MAYMOVE | MREMAP_DONTUNMAP))
+	if (flags & ~(MREMAP_FIXED | MREMAP_MAYMOVE))
 		return ret;
 
 	if (flags & MREMAP_FIXED && !(flags & MREMAP_MAYMOVE))
 		return ret;
-
-	/*
-	 * MREMAP_DONTUNMAP is always a move and it does not allow resizing
-	 * in the process.
-	 */
-	if (flags & MREMAP_DONTUNMAP &&
-			(!(flags & MREMAP_MAYMOVE) || old_len != new_len))
-		return ret;
-
 
 	if (offset_in_page(addr))
 		return ret;
@@ -751,13 +639,12 @@ SYSCALL_DEFINE5(mremap, unsigned long, addr, unsigned long, old_len,
 	if (!new_len)
 		return ret;
 
-	if (mmap_write_lock_killable(current->mm))
+	if (down_write_killable(&current->mm->mmap_sem))
 		return -EINTR;
 
-	if (flags & (MREMAP_FIXED | MREMAP_DONTUNMAP)) {
+	if (flags & MREMAP_FIXED) {
 		ret = mremap_to(addr, old_len, new_addr, new_len,
-				&locked, flags, &uf, &uf_unmap_early,
-				&uf_unmap);
+				&locked, &uf, &uf_unmap_early, &uf_unmap);
 		goto out;
 	}
 
@@ -785,7 +672,7 @@ SYSCALL_DEFINE5(mremap, unsigned long, addr, unsigned long, old_len,
 	/*
 	 * Ok, we need to grow..
 	 */
-	vma = vma_to_resize(addr, old_len, new_len, flags, &charged);
+	vma = vma_to_resize(addr, old_len, new_len, &charged);
 	if (IS_ERR(vma)) {
 		ret = PTR_ERR(vma);
 		goto out;
@@ -835,7 +722,7 @@ SYSCALL_DEFINE5(mremap, unsigned long, addr, unsigned long, old_len,
 		}
 
 		ret = move_vma(vma, addr, old_len, new_len, new_addr,
-			       &locked, flags, &uf, &uf_unmap);
+			       &locked, &uf, &uf_unmap);
 	}
 out:
 	if (offset_in_page(ret)) {
@@ -843,13 +730,13 @@ out:
 		locked = 0;
 	}
 	if (downgraded)
-		mmap_read_unlock(current->mm);
+		up_read(&current->mm->mmap_sem);
 	else
-		mmap_write_unlock(current->mm);
+		up_write(&current->mm->mmap_sem);
 	if (locked && new_len > old_len)
 		mm_populate(new_addr + old_len, new_len - old_len);
 	userfaultfd_unmap_complete(mm, &uf_unmap_early);
-	mremap_userfaultfd_complete(&uf, addr, ret, old_len);
+	mremap_userfaultfd_complete(&uf, addr, new_addr, old_len);
 	userfaultfd_unmap_complete(mm, &uf_unmap);
 	return ret;
 }

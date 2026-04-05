@@ -94,14 +94,14 @@ void do_page_fault(unsigned long address, struct pt_regs *regs)
 	         (regs->ecr_cause == ECR_C_PROTV_INST_FETCH))
 		exec = 1;
 
-	flags = FAULT_FLAG_DEFAULT;
+	flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
 	if (user_mode(regs))
 		flags |= FAULT_FLAG_USER;
 	if (write)
 		flags |= FAULT_FLAG_WRITE;
 
 retry:
-	mmap_read_lock(mm);
+	down_read(&mm->mmap_sem);
 
 	vma = find_vma(mm, address);
 	if (!vma)
@@ -127,24 +127,33 @@ retry:
 
 	fault = handle_mm_fault(vma, address, flags);
 
-	/* Quick path to respond to signals */
-	if (fault_signal_pending(fault, regs)) {
-		if (!user_mode(regs))
-			goto no_context;
-		return;
-	}
-
 	/*
-	 * Fault retry nuances, mmap_sem already relinquished by core mm
+	 * Fault retry nuances
 	 */
-	if (unlikely((fault & VM_FAULT_RETRY) &&
-		     (flags & FAULT_FLAG_ALLOW_RETRY))) {
-		flags |= FAULT_FLAG_TRIED;
-		goto retry;
+	if (unlikely(fault & VM_FAULT_RETRY)) {
+
+		/*
+		 * If fault needs to be retried, handle any pending signals
+		 * first (by returning to user mode).
+		 * mmap_sem already relinquished by core mm for RETRY case
+		 */
+		if (fatal_signal_pending(current)) {
+			if (!user_mode(regs))
+				goto no_context;
+			return;
+		}
+		/*
+		 * retry state machine
+		 */
+		if (flags & FAULT_FLAG_ALLOW_RETRY) {
+			flags &= ~FAULT_FLAG_ALLOW_RETRY;
+			flags |= FAULT_FLAG_TRIED;
+			goto retry;
+		}
 	}
 
 bad_area:
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 
 	/*
 	 * Major/minor page fault accounting

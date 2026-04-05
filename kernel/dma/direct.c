@@ -203,18 +203,6 @@ void dma_direct_free_pages(struct device *dev, size_t size, void *cpu_addr,
 	__dma_direct_free_pages(dev, size, virt_to_page(cpu_addr));
 }
 
-static bool is_dma_coherent(struct device *dev, unsigned long attrs)
-{
-	if (attrs & DMA_ATTR_FORCE_COHERENT)
-		return true;
-	else if (attrs & DMA_ATTR_FORCE_NON_COHERENT)
-		return false;
-	else if (dev_is_dma_coherent(dev))
-		return true;
-	else
-		return false;
-}
-
 void *dma_direct_alloc(struct device *dev, size_t size,
 		dma_addr_t *dma_handle, gfp_t gfp, unsigned long attrs)
 {
@@ -317,7 +305,7 @@ void dma_direct_unmap_page(struct device *dev, dma_addr_t addr,
 {
 	phys_addr_t phys = dma_to_phys(dev, addr);
 
-	if (!is_dma_coherent(dev, attrs) && !(attrs & DMA_ATTR_SKIP_CPU_SYNC))
+	if (!(attrs & DMA_ATTR_SKIP_CPU_SYNC))
 		dma_direct_sync_single_for_cpu(dev, addr, size, dir);
 
 	if (unlikely(is_swiotlb_buffer(phys)))
@@ -359,7 +347,7 @@ dma_addr_t dma_direct_map_page(struct device *dev, struct page *page,
 		return DMA_MAPPING_ERROR;
 	}
 
-	if (!is_dma_coherent(dev, attrs) && !(attrs & DMA_ATTR_SKIP_CPU_SYNC))
+	if (!dev_is_dma_coherent(dev) && !(attrs & DMA_ATTR_SKIP_CPU_SYNC))
 		arch_sync_dma_for_device(phys, size, dir);
 	return dma_addr;
 }

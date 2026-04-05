@@ -50,7 +50,7 @@ static inline void count_compact_events(enum vm_event_item item, long delta)
 #define pageblock_start_pfn(pfn)	block_start_pfn(pfn, pageblock_order)
 #define pageblock_end_pfn(pfn)		block_end_pfn(pfn, pageblock_order)
 
-unsigned long release_freepages(struct list_head *freelist)
+static unsigned long release_freepages(struct list_head *freelist)
 {
 	struct page *page, *next;
 	unsigned long high_pfn = 0;
@@ -66,7 +66,7 @@ unsigned long release_freepages(struct list_head *freelist)
 	return high_pfn;
 }
 
-void split_map_pages(struct list_head *list)
+static void split_map_pages(struct list_head *list)
 {
 	unsigned int i, order, nr_pages;
 	struct page *page, *next;
@@ -986,7 +986,7 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 		/* Successfully isolated */
 		del_page_from_lru_list(page, lruvec, page_lru(page));
 		inc_node_page_state(page,
-				NR_ISOLATED_ANON + page_is_file_lru(page));
+				NR_ISOLATED_ANON + page_is_file_cache(page));
 
 isolate_success:
 		list_add(&page->lru, &cc->migratepages);
@@ -2227,11 +2227,15 @@ check_drain:
 		 * would succeed.
 		 */
 		if (cc->order > 0 && last_migrated_pfn) {
+			int cpu;
 			unsigned long current_block_start =
 				block_start_pfn(cc->migrate_pfn, cc->order);
 
 			if (last_migrated_pfn < current_block_start) {
-				lru_add_drain_cpu_zone(cc->zone);
+				cpu = get_cpu();
+				lru_add_drain_cpu(cpu);
+				drain_local_pages(cc->zone);
+				put_cpu();
 				/* No more flushing until we migrate again */
 				last_migrated_pfn = 0;
 			}
@@ -2339,16 +2343,11 @@ enum compact_result try_to_compact_pages(gfp_t gfp_mask, unsigned int order,
 		unsigned int alloc_flags, const struct alloc_context *ac,
 		enum compact_priority prio, struct page **capture)
 {
-	int may_perform_io = gfp_mask & __GFP_IO;
 	struct zoneref *z;
 	struct zone *zone;
 	enum compact_result rc = COMPACT_SKIPPED;
 
-	/*
-	 * Check if the GFP flags allow compaction - GFP_NOIO is really
-	 * tricky context because the migration might require IO
-	 */
-	if (!may_perform_io)
+	if (!gfp_compaction_allowed(gfp_mask))
 		return COMPACT_SKIPPED;
 
 	trace_mm_compaction_try_to_compact_pages(order, gfp_mask, prio);

@@ -19,9 +19,6 @@
 #include <linux/irqdesc.h>
 #include <linux/wakeup_reason.h>
 #include <trace/events/power.h>
-#include <linux/irq.h>
-#include <linux/interrupt.h>
-#include <linux/irqdesc.h>
 
 #include "power.h"
 
@@ -971,8 +968,7 @@ void pm_system_irq_wakeup(unsigned int irq_number)
 			name = desc->action->name;
 
 		log_irq_wakeup_reason(irq_number);
-		pr_warn("%s: %d triggered %s\n", __func__,
-				irq_number, name);
+		pr_warn("%s: %d triggered %s\n", __func__, irq_number, name);
 
 		pm_system_wakeup();
 	}

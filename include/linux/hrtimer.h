@@ -74,7 +74,6 @@ enum hrtimer_restart {
  *
  * 0x00		inactive
  * 0x01		enqueued into rbtree
- * 0x02		timer is pinned to a cpu
  *
  * The callback state is not part of the timer->state because clearing it would
  * mean touching the timer after the callback, this makes it impossible to free
@@ -94,8 +93,6 @@ enum hrtimer_restart {
  */
 #define HRTIMER_STATE_INACTIVE	0x00
 #define HRTIMER_STATE_ENQUEUED	0x01
-#define HRTIMER_PINNED_SHIFT	1
-#define HRTIMER_STATE_PINNED	(1 << HRTIMER_PINNED_SHIFT)
 
 /**
  * struct hrtimer - the basic hrtimer structure
@@ -372,9 +369,6 @@ static inline void hrtimer_cancel_wait_running(struct hrtimer *timer)
 
 /* Exported timer functions: */
 
-/* To be used from cpusets, only */
-extern void hrtimer_quiesce_cpu(void *cpup);
-
 /* Initialize timers: */
 extern void hrtimer_init(struct hrtimer *timer, clockid_t which_clock,
 			 enum hrtimer_mode mode);
@@ -534,6 +528,7 @@ extern void __init hrtimers_init(void);
 extern void sysrq_timer_list_show(void);
 
 int hrtimers_prepare_cpu(unsigned int cpu);
+int hrtimers_cpu_starting(unsigned int cpu);
 #ifdef CONFIG_HOTPLUG_CPU
 int hrtimers_dead_cpu(unsigned int cpu);
 #else

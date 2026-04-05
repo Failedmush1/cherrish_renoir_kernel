@@ -394,7 +394,6 @@ static struct dyn_event_operations synth_event_ops = {
 	.match = synth_event_match,
 };
 
-#ifndef CONFIG_KPROBES_DEBUG
 struct synth_field {
 	char *type;
 	char *name;
@@ -414,7 +413,6 @@ struct synth_event {
 	struct trace_event_call			call;
 	struct tracepoint			*tp;
 };
-#endif
 
 static bool is_synth_event(struct dyn_event *ev)
 {
@@ -969,11 +967,8 @@ static notrace void trace_event_raw_event_synth(void *__data,
 			n_u64++;
 		}
 	}
-#ifdef CONFIG_CORESIGHT_QGKI
-	trace_event_buffer_commit(&fbuffer, sizeof(*entry) + fields_size);
-#else
+
 	trace_event_buffer_commit(&fbuffer);
-#endif
 out:
 	ring_buffer_nest_end(buffer);
 }
@@ -1176,11 +1171,7 @@ static inline void trace_synth(struct synth_event *event, u64 *var_ref_vals,
 	}
 }
 
-#ifdef CONFIG_KPROBES_DEBUG
-struct synth_event *find_synth_event(const char *name)
-#else
 static struct synth_event *find_synth_event(const char *name)
-#endif
 {
 	struct dyn_event *pos;
 	struct synth_event *event;
@@ -1195,9 +1186,6 @@ static struct synth_event *find_synth_event(const char *name)
 
 	return NULL;
 }
-#ifdef CONFIG_KPROBES_DEBUG
-EXPORT_SYMBOL(find_synth_event);
-#endif
 
 static int register_synth_event(struct synth_event *event)
 {
@@ -3646,14 +3634,16 @@ static struct field_var *create_field_var(struct hist_trigger_data *hist_data,
 	var = create_var(hist_data, file, field_name, val->size, val->type);
 	if (IS_ERR(var)) {
 		hist_err(tr, HIST_ERR_VAR_CREATE_FIND_FAIL, errpos(field_name));
-		kfree(val);
+		destroy_hist_field(val, 0);
 		ret = PTR_ERR(var);
 		goto err;
 	}
 
 	field_var = kzalloc(sizeof(struct field_var), GFP_KERNEL);
 	if (!field_var) {
-		kfree(val);
+		destroy_hist_field(val, 0);
+		kfree_const(var->type);
+		kfree(var->var.name);
 		kfree(var);
 		ret =  -ENOMEM;
 		goto err;
@@ -4653,7 +4643,7 @@ static int create_var_field(struct hist_trigger_data *hist_data,
 
 	ret = __create_val_field(hist_data, val_idx, file, var_name, expr_str, flags);
 
-	if (!ret && hist_data->fields[val_idx]->flags & HIST_FIELD_FL_STRING)
+	if (hist_data->fields[val_idx]->flags & HIST_FIELD_FL_STRING)
 		hist_data->fields[val_idx]->var_str_idx = hist_data->n_var_str++;
 
 	return ret;

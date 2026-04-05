@@ -128,16 +128,6 @@ void arch_cpu_idle(void)
 	trace_cpu_idle_rcuidle(PWR_EVENT_EXIT, smp_processor_id());
 }
 
-void arch_cpu_idle_enter(void)
-{
-	idle_notifier_call_chain(IDLE_START);
-}
-
-void arch_cpu_idle_exit(void)
-{
-	idle_notifier_call_chain(IDLE_END);
-}
-
 #ifdef CONFIG_HOTPLUG_CPU
 void arch_cpu_idle_dead(void)
 {
@@ -443,7 +433,7 @@ static void tls_thread_switch(struct task_struct *next)
 
 	if (is_compat_thread(task_thread_info(next)))
 		write_sysreg(next->thread.uw.tp_value, tpidrro_el0);
-	else if (!arm64_kernel_unmapped_at_el0())
+	else
 		write_sysreg(0, tpidrro_el0);
 
 	write_sysreg(*task_user_tls(next), tpidr_el0);

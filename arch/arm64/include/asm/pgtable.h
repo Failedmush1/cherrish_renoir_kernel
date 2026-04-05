@@ -145,7 +145,8 @@ static inline pte_t set_pte_bit(pte_t pte, pgprot_t prot)
 static inline pte_t pte_mkwrite(pte_t pte)
 {
 	pte = set_pte_bit(pte, __pgprot(PTE_WRITE));
-	pte = clear_pte_bit(pte, __pgprot(PTE_RDONLY));
+	if (pte_sw_dirty(pte))
+		pte = clear_pte_bit(pte, __pgprot(PTE_RDONLY));
 	return pte;
 }
 
@@ -511,11 +512,6 @@ static inline phys_addr_t pmd_page_paddr(pmd_t pmd)
 
 static inline void pte_unmap(pte_t *pte) { }
 
-static inline unsigned long pmd_page_vaddr(pmd_t pmd)
-{
-	return (unsigned long) __va(pmd_page_paddr(pmd));
-}
-
 /* Find an entry in the third-level page table. */
 #define pte_index(addr)		(((addr) >> PAGE_SHIFT) & (PTRS_PER_PTE - 1))
 
@@ -575,11 +571,6 @@ static inline phys_addr_t pud_page_paddr(pud_t pud)
 	return __pud_to_phys(pud);
 }
 
-static inline unsigned long pud_page_vaddr(pud_t pud)
-{
-	return (unsigned long) __va(pud_page_paddr(pud));
-}
-
 /* Find an entry in the second-level page table. */
 #define pmd_index(addr)		(((addr) >> PMD_SHIFT) & (PTRS_PER_PMD - 1))
 
@@ -636,11 +627,6 @@ static inline void pgd_clear(pgd_t *pgdp)
 static inline phys_addr_t pgd_page_paddr(pgd_t pgd)
 {
 	return __pgd_to_phys(pgd);
-}
-
-static inline unsigned long pgd_page_vaddr(pgd_t pgd)
-{
-	return (unsigned long) __va(pgd_page_paddr(pgd));
 }
 
 /* Find an entry in the frst-level page table. */
@@ -891,30 +877,6 @@ static inline void update_mmu_cache(struct vm_area_struct *vma,
 #else
 #define phys_to_ttbr(addr)	(addr)
 #endif
-
-/*
- * On arm64 without hardware Access Flag, copying from user will fail because
- * the pte is old and cannot be marked young. So we always end up with zeroed
- * page after fork() + CoW for pfn mappings. We don't always have a
- * hardware-managed access flag on arm64.
- */
-static inline bool arch_faults_on_old_pte(void)
-{
-	WARN_ON(preemptible());
-
-	return !cpu_has_hw_af();
-}
-#define arch_faults_on_old_pte		arch_faults_on_old_pte
-
-/*
- * Experimentally, it's cheap to set the access flag in hardware and we
- * benefit from prefaulting mappings as 'old' to start with.
- */
-static inline bool arch_wants_old_prefaulted_pte(void)
-{
-	return !arch_faults_on_old_pte();
-}
-#define arch_wants_old_prefaulted_pte	arch_wants_old_prefaulted_pte
 
 #endif /* !__ASSEMBLY__ */
 

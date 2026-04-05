@@ -383,12 +383,12 @@ void arm64_notify_segfault(unsigned long addr)
 {
 	int code;
 
-	mmap_read_lock(current->mm);
+	down_read(&current->mm->mmap_sem);
 	if (find_vma(current->mm, addr) == NULL)
 		code = SEGV_MAPERR;
 	else
 		code = SEGV_ACCERR;
-	mmap_read_unlock(current->mm);
+	up_read(&current->mm->mmap_sem);
 
 	force_signal_inject(SIGSEGV, code, addr);
 }

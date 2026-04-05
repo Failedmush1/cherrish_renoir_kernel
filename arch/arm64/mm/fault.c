@@ -24,10 +24,6 @@
 #include <linux/preempt.h>
 #include <linux/hugetlb.h>
 
-#ifdef CONFIG_TLB_CONF_HANDLER
-#include <linux/qcom_scm.h>
-#endif
-
 #include <asm/acpi.h>
 #include <asm/bug.h>
 #include <asm/cmpxchg.h>
@@ -410,9 +406,10 @@ static void do_bad_area(unsigned long addr, unsigned int esr, struct pt_regs *re
 #define VM_FAULT_BADMAP		((__force vm_fault_t)0x010000)
 #define VM_FAULT_BADACCESS	((__force vm_fault_t)0x020000)
 
-static int __do_page_fault(struct vm_area_struct *vma, unsigned long addr,
+static vm_fault_t __do_page_fault(struct mm_struct *mm, unsigned long addr,
 			   unsigned int mm_flags, unsigned long vm_flags)
 {
+	struct vm_area_struct *vma = find_vma(mm, addr);
 
 	if (unlikely(!vma))
 		return VM_FAULT_BADMAP;
@@ -458,8 +455,7 @@ static int __kprobes do_page_fault(unsigned long addr, unsigned int esr,
 	struct mm_struct *mm = current->mm;
 	vm_fault_t fault, major = 0;
 	unsigned long vm_flags = VM_READ | VM_WRITE | VM_EXEC;
-	unsigned int mm_flags = FAULT_FLAG_DEFAULT;
-	struct vm_area_struct *vma = NULL;
+	unsigned int mm_flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
 
 	if (kprobe_page_fault(regs, esr))
 		return 0;
@@ -500,23 +496,15 @@ static int __kprobes do_page_fault(unsigned long addr, unsigned int esr,
 	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, addr);
 
 	/*
-	 * let's try a speculative page fault without grabbing the
-	 * mmap_sem.
-	 */
-	fault = handle_speculative_fault(mm, addr, mm_flags, &vma);
-	if (fault != VM_FAULT_RETRY)
-		goto done;
-
-	/*
 	 * As per x86, we may deadlock here. However, since the kernel only
 	 * validly references user space from well defined areas of the code,
 	 * we can bug out early if this is from code which shouldn't.
 	 */
-	if (!mmap_read_trylock(mm)) {
+	if (!down_read_trylock(&mm->mmap_sem)) {
 		if (!user_mode(regs) && !search_exception_tables(regs->pc))
 			goto no_context;
 retry:
-		mmap_read_lock(mm);
+		down_read(&mm->mmap_sem);
 	} else {
 		/*
 		 * The above down_read_trylock() might have succeeded in which
@@ -525,41 +513,39 @@ retry:
 		might_sleep();
 #ifdef CONFIG_DEBUG_VM
 		if (!user_mode(regs) && !search_exception_tables(regs->pc)) {
-			mmap_read_unlock(mm);
+			up_read(&mm->mmap_sem);
 			goto no_context;
 		}
 #endif
 	}
 
-	if (!vma || !can_reuse_spf_vma(vma, addr))
-		vma = find_vma(mm, addr);
-
-	fault = __do_page_fault(vma, addr, mm_flags, vm_flags);
+	fault = __do_page_fault(mm, addr, mm_flags, vm_flags);
 	major |= fault & VM_FAULT_MAJOR;
 
-	/* Quick path to respond to signals */
-	if (fault_signal_pending(fault, regs)) {
-		if (!user_mode(regs))
-			goto no_context;
-		return 0;
-	}
-
 	if (fault & VM_FAULT_RETRY) {
+		/*
+		 * If we need to retry but a fatal signal is pending,
+		 * handle the signal first. We do not need to release
+		 * the mmap_sem because it would already be released
+		 * in __lock_page_or_retry in mm/filemap.c.
+		 */
+		if (fatal_signal_pending(current)) {
+			if (!user_mode(regs))
+				goto no_context;
+			return 0;
+		}
+
+		/*
+		 * Clear FAULT_FLAG_ALLOW_RETRY to avoid any risk of
+		 * starvation.
+		 */
 		if (mm_flags & FAULT_FLAG_ALLOW_RETRY) {
+			mm_flags &= ~FAULT_FLAG_ALLOW_RETRY;
 			mm_flags |= FAULT_FLAG_TRIED;
-
-			/*
-			 * Do not try to reuse this vma and fetch it
-			 * again since we will release the mmap_sem.
-			 */
-			vma = NULL;
-
 			goto retry;
 		}
 	}
-	mmap_read_unlock(mm);
-
-done:
+	up_read(&mm->mmap_sem);
 
 	/*
 	 * Handle the "normal" (no error) case first.
@@ -685,15 +671,6 @@ static int do_sea(unsigned long addr, unsigned int esr, struct pt_regs *regs)
 	return 0;
 }
 
-#ifdef CONFIG_TLB_CONF_HANDLER
-static int do_tlb_conf_fault(unsigned long addr, unsigned int esr, struct pt_regs *regs)
-{
-	if (qcom_scm_tlb_conf_handler(addr))
-		return 1;
-	return 0;
-}
-#endif
-
 static const struct fault_info fault_info[] = {
 	{ do_bad,		SIGKILL, SI_KERNEL,	"ttbr address size fault"	},
 	{ do_bad,		SIGKILL, SI_KERNEL,	"level 1 address size fault"	},
@@ -743,11 +720,7 @@ static const struct fault_info fault_info[] = {
 	{ do_bad,		SIGKILL, SI_KERNEL,	"unknown 45"			},
 	{ do_bad,		SIGKILL, SI_KERNEL,	"unknown 46"			},
 	{ do_bad,		SIGKILL, SI_KERNEL,	"unknown 47"			},
-#ifdef CONFIG_TLB_CONF_HANDLER
-	{ do_tlb_conf_fault,	SIGKILL, SI_KERNEL,	"TLB conflict abort"		},
-#else
 	{ do_bad,		SIGKILL, SI_KERNEL,	"TLB conflict abort"		},
-#endif
 	{ do_bad,		SIGKILL, SI_KERNEL,	"Unsupported atomic hardware update fault"	},
 	{ do_bad,		SIGKILL, SI_KERNEL,	"unknown 50"			},
 	{ do_bad,		SIGKILL, SI_KERNEL,	"unknown 51"			},

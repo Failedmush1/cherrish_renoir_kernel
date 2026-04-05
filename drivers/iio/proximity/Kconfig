@@ -49,6 +49,8 @@ config LIDAR_LITE_V2
 config MB1232
 	tristate "MaxSonar I2CXL family ultrasonic sensors"
 	depends on I2C
+	select IIO_BUFFER
+	select IIO_TRIGGERED_BUFFER
 	help
 	  Say Y to build a driver for the ultrasonic sensors I2CXL of
 	  MaxBotix which have an i2c interface. It can be used to measure
@@ -122,16 +124,5 @@ config VL53L0X_I2C
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called vl53l0x-i2c.
-
-config MIUS_PROXIMITY
-	tristate "xiaomi ultrasound proximity sensor"
-	depends on BOARD_XIAOMI
-	select IIO_BUFFER
-	select IIO_TRIGGERED_BUFFER
-	select IIO_BUFFER_CB
-	select IIO_KFIFO_BUF
-	select IIO_TRIGGER
-	help
-	  Say Y here to build a driver for Xiaomi MIUS proximity sensor.
 
 endmenu

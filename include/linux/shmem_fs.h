@@ -77,7 +77,6 @@ extern void shmem_truncate_range(struct inode *inode, loff_t start, loff_t end);
 extern int shmem_unuse(unsigned int type, bool frontswap,
 		       unsigned long *fs_pages_to_unuse);
 
-extern bool shmem_huge_enabled(struct vm_area_struct *vma);
 extern unsigned long shmem_swap_usage(struct vm_area_struct *vma);
 extern unsigned long shmem_partial_swap_usage(struct address_space *mapping,
 						pgoff_t start, pgoff_t end);
@@ -114,18 +113,30 @@ static inline bool shmem_file(struct file *file)
 extern bool shmem_charge(struct inode *inode, long pages);
 extern void shmem_uncharge(struct inode *inode, long pages);
 
-#ifdef CONFIG_USERFAULTFD
+#ifdef CONFIG_TRANSPARENT_HUGE_PAGECACHE
+extern bool shmem_huge_enabled(struct vm_area_struct *vma);
+#else
+static inline bool shmem_huge_enabled(struct vm_area_struct *vma)
+{
+	return false;
+}
+#endif
+
 #ifdef CONFIG_SHMEM
-extern int shmem_mfill_atomic_pte(struct mm_struct *dst_mm, pmd_t *dst_pmd,
+extern int shmem_mcopy_atomic_pte(struct mm_struct *dst_mm, pmd_t *dst_pmd,
 				  struct vm_area_struct *dst_vma,
 				  unsigned long dst_addr,
 				  unsigned long src_addr,
-				  bool zeropage,
 				  struct page **pagep);
-#else /* !CONFIG_SHMEM */
-#define shmem_mfill_atomic_pte(dst_mm, dst_pmd, dst_vma, dst_addr, \
-			       src_addr, zeropage, pagep)       ({ BUG(); 0; })
-#endif /* CONFIG_SHMEM */
-#endif /* CONFIG_USERFAULTFD */
+extern int shmem_mfill_zeropage_pte(struct mm_struct *dst_mm,
+				    pmd_t *dst_pmd,
+				    struct vm_area_struct *dst_vma,
+				    unsigned long dst_addr);
+#else
+#define shmem_mcopy_atomic_pte(dst_mm, dst_pte, dst_vma, dst_addr, \
+			       src_addr, pagep)        ({ BUG(); 0; })
+#define shmem_mfill_zeropage_pte(dst_mm, dst_pmd, dst_vma, \
+				 dst_addr)      ({ BUG(); 0; })
+#endif
 
 #endif

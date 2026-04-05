@@ -108,7 +108,7 @@ static int __bad_area(struct pt_regs *regs, unsigned long address, int si_code)
 	 * Something tried to access memory that isn't in our memory map..
 	 * Fix it, but check if it's kernel or user first..
 	 */
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 
 	return __bad_area_nosemaphore(regs, address, si_code);
 }
@@ -437,7 +437,7 @@ static int __do_page_fault(struct pt_regs *regs, unsigned long address,
 {
 	struct vm_area_struct * vma;
 	struct mm_struct *mm = current->mm;
-	unsigned int flags = FAULT_FLAG_DEFAULT;
+	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
  	int is_exec = TRAP(regs) == 0x400;
 	int is_user = user_mode(regs);
 	int is_write = page_fault_is_write(error_code);
@@ -517,12 +517,12 @@ static int __do_page_fault(struct pt_regs *regs, unsigned long address,
 	 * source.  If this is invalid we can skip the address space check,
 	 * thus avoiding the deadlock.
 	 */
-	if (unlikely(!mmap_read_trylock(mm))) {
+	if (unlikely(!down_read_trylock(&mm->mmap_sem))) {
 		if (!is_user && !search_exception_tables(regs->nip))
 			return bad_area_nosemaphore(regs, address);
 
 retry:
-		mmap_read_lock(mm);
+		down_read(&mm->mmap_sem);
 	} else {
 		/*
 		 * The above down_read_trylock() might have succeeded in
@@ -546,7 +546,7 @@ retry:
 		if (!must_retry)
 			return bad_area(regs, address);
 
-		mmap_read_unlock(mm);
+		up_read(&mm->mmap_sem);
 		if (fault_in_pages_readable((const char __user *)regs->nip,
 					    sizeof(unsigned int)))
 			return bad_area_nosemaphore(regs, address);
@@ -578,28 +578,38 @@ good_area:
 
 		int pkey = vma_pkey(vma);
 
-		mmap_read_unlock(mm);
+		up_read(&mm->mmap_sem);
 		return bad_key_fault_exception(regs, address, pkey);
 	}
 #endif /* CONFIG_PPC_MEM_KEYS */
 
 	major |= fault & VM_FAULT_MAJOR;
 
-	if (fault_signal_pending(fault, regs))
-		return user_mode(regs) ? 0 : SIGBUS;
-
 	/*
 	 * Handle the retry right now, the mmap_sem has been released in that
 	 * case.
 	 */
 	if (unlikely(fault & VM_FAULT_RETRY)) {
+		/* We retry only once */
 		if (flags & FAULT_FLAG_ALLOW_RETRY) {
+			/*
+			 * Clear FAULT_FLAG_ALLOW_RETRY to avoid any risk
+			 * of starvation.
+			 */
+			flags &= ~FAULT_FLAG_ALLOW_RETRY;
 			flags |= FAULT_FLAG_TRIED;
-			goto retry;
+			if (!fatal_signal_pending(current))
+				goto retry;
 		}
+
+		/*
+		 * User mode? Just return to handle the fatal exception otherwise
+		 * return to bad_page_fault
+		 */
+		return is_user ? 0 : SIGBUS;
 	}
 
-	mmap_read_unlock(current->mm);
+	up_read(&current->mm->mmap_sem);
 
 	if (unlikely(fault & VM_FAULT_ERROR))
 		return mm_fault_error(regs, address, fault);

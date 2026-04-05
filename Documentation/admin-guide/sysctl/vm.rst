@@ -39,7 +39,6 @@ Currently, these files are in /proc/sys/vm:
 - extfrag_threshold
 - extra_free_kbytes
 - hugetlb_shm_group
-- kswapd_threads
 - laptop_mode
 - legacy_va_layout
 - lowmem_reserve_ratio
@@ -58,7 +57,6 @@ Currently, these files are in /proc/sys/vm:
 - nr_trim_pages         (only if CONFIG_MMU=n)
 - numa_zonelist_order
 - oom_dump_tasks
-- reap_mem_on_sigkill
 - oom_kill_allocating_task
 - overcommit_kbytes
 - overcommit_memory
@@ -312,25 +310,6 @@ hugetlb_shm_group
 hugetlb_shm_group contains group id that is allowed to create SysV
 shared memory segment using hugetlb page.
 
-kswapd_threads
-==============
-kswapd_threads allows you to control the number of kswapd threads per node
-running on the system. This provides the ability to devote additional CPU
-resources toward proactive page replacement with the goal of reducing
-direct reclaims. When direct reclaims are prevented, the CPU consumed
-by them is prevented as well. Depending on the workload, the result can
-cause aggregate CPU usage on the system to go up, down or stay the same.
-
-More aggressive page replacement can reduce direct reclaims which cause
-latency for tasks and decrease throughput when doing filesystem IO through
-the pagecache. Direct reclaims are recorded using the allocstall counter
-in /proc/vmstat.
-
-The default value is 1 and the range of acceptible values are 1-16.
-Always start with lower values in the 2-6 range. Higher values should
-be justified with testing. If direct reclaims occur in spite of high
-values, the cost of direct reclaims (in latency) that occur can be
-higher due to increased lock contention.
 
 laptop_mode
 ===========
@@ -691,22 +670,6 @@ OOM killer actually kills a memory-hogging task.
 
 The default value is 1 (enabled).
 
-reap_mem_on_sigkill
-===================
-
-This enables or disables the memory reaping for a SIGKILL received
-process and that the sending process must have the CAP_KILL capabilities.
-
-If this is set to 1, when a process receives SIGKILL from a process
-that has the capability, CAP_KILL, the process is added into the oom_reaper
-queue which can be picked up by the oom_reaper thread to reap the memory of
-that process. This reaps for the process which received SIGKILL through
-either sys_kill from user or kill_pid from kernel.
-
-If this is set to 0, we are not reaping memory of a SIGKILL, sent through
-either sys_kill from user or kill_pid from kernel, received process.
-
-The default value is 0 (disabled).
 
 oom_kill_allocating_task
 ========================
@@ -890,42 +853,24 @@ tooling to work, you can do::
 swappiness
 ==========
 
-This control is used to define the rough relative IO cost of swapping
-and filesystem paging, as a value between 0 and 200. At 100, the VM
-assumes equal IO cost and will thus apply memory pressure to the page
-cache and swap-backed pages equally; lower values signify more
-expensive swap IO, higher values indicates cheaper.
-
-Keep in mind that filesystem IO patterns under memory pressure tend to
-be more efficient than swap's random IO. An optimal value will require
-experimentation and will also be workload-dependent.
+This control is used to define how aggressive the kernel will swap
+memory pages.  Higher values will increase aggressiveness, lower values
+decrease the amount of swap.  A value of 0 instructs the kernel not to
+initiate swap until the amount of free and file-backed pages is less
+than the high water mark in a zone.
 
 The default value is 60.
-
-For in-memory swap, like zram or zswap, as well as hybrid setups that
-have swap on faster devices than the filesystem, values beyond 100 can
-be considered. For example, if the random IO against the swap device
-is on average 2x faster than IO from the filesystem, swappiness should
-be 133 (x + 2x = 200, 2x = 133.33).
-
-At 0, the kernel will not initiate swap until the amount of free and
-file-backed pages is less than the high watermark in a zone.
 
 
 unprivileged_userfaultfd
 ========================
 
-This flag controls the mode in which unprivileged users can use the
-userfaultfd system calls. Set this to 0 to restrict unprivileged users
-to handle page faults in user mode only. In this case, users without
-SYS_CAP_PTRACE must pass UFFD_USER_MODE_ONLY in order for userfaultfd to
-succeed. Prohibiting use of userfaultfd for handling faults from kernel
-mode may make certain vulnerabilities more difficult to exploit.
+This flag controls whether unprivileged users can use the userfaultfd
+system calls.  Set this to 1 to allow unprivileged users to use the
+userfaultfd system calls, or set this to 0 to restrict userfaultfd to only
+privileged users (with SYS_CAP_PTRACE capability).
 
-Set this to 1 to allow unprivileged users to use the userfaultfd system
-calls without any restrictions.
-
-The default value is 0.
+The default value is 1.
 
 
 user_reserve_kbytes

@@ -8,7 +8,11 @@
 # We cannot go as far as adding -Wpedantic since it emits too many warnings.
 UAPI_CFLAGS := -std=c90 -Wall -Werror=implicit-function-declaration
 
-override c_flags = $(UAPI_CFLAGS) -Wp,-MD,$(depfile) -I$(objtree)/usr/include
+# In theory, we do not care -m32 or -m64 for header compile tests.
+# It is here just because CONFIG_CC_CAN_LINK is tested with -m32 or -m64.
+UAPI_CFLAGS += $(filter -m32 -m64 --target=%, $(KBUILD_CPPFLAGS) $(KBUILD_CFLAGS))
+
+override c_flags = $(UAPI_CFLAGS) -Wp,-MMD,$(depfile) -I$(objtree)/usr/include
 
 # The following are excluded for now because they fail to build.
 #
@@ -62,35 +66,6 @@ header-test- += sound/sfnt_info.h
 header-test- += xen/evtchn.h
 header-test- += xen/gntdev.h
 header-test- += xen/privcmd.h
-
-header-test- += camera/media/cam_jpeg.h
-header-test- += camera/media/cam_icp.h
-header-test- += camera/media/cam_isp.h
-header-test- += camera/media/cam_cpas.h
-header-test- += camera/media/cam_sensor.h
-header-test- += camera/media/cam_fd.h
-header-test- += camera/media/cam_tfe.h
-header-test- += camera/media/cam_custom.h
-header-test- += camera/media/cam_ope.h
-header-test- += camera/media/cam_sync.h
-header-test- += camera/media/cam_req_mgr.h
-header-test- += camera/media/cam_lrme.h
-header-test- += camera/media/cam_defs.h
-
-header-test- += ais/media/ais_isp.h
-header-test- += ais/media/cam_lrme.h
-header-test- += ais/media/cam_cpas.h
-header-test- += ais/media/cam_fd.h
-header-test- += ais/media/cam_jpeg.h
-header-test- += ais/media/cam_sync.h
-header-test- += ais/media/cam_isp.h
-header-test- += ais/media/cam_icp.h
-header-test- += ais/media/cam_req_mgr.h
-header-test- += ais/media/cam_sensor.h
-header-test- += ais/media/cam_defs.h
-header-test- += ais/media/ais_sensor.h
-header-test- += display/media/msm_sde_rotator.h
-header-test- += vidc/media/msm_vidc_private.h
 
 # More headers are broken in some architectures
 

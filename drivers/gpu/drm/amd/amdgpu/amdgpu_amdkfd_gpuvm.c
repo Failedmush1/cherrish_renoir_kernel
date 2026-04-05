@@ -1204,6 +1204,7 @@ allocate_init_user_pages_failed:
 err_bo_create:
 	unreserve_mem_limit(adev, size, alloc_domain, !!sg);
 err_reserve_limit:
+	amdgpu_sync_free(&(*mem)->sync);
 	mutex_destroy(&(*mem)->lock);
 	kfree(*mem);
 err:
@@ -1318,9 +1319,9 @@ int amdgpu_amdkfd_gpuvm_map_memory_to_gpu(
 	 * concurrently and the queues are actually stopped
 	 */
 	if (amdgpu_ttm_tt_get_usermm(bo->tbo.ttm)) {
-		mmap_write_lock(current->mm);
+		down_write(&current->mm->mmap_sem);
 		is_invalid_userptr = atomic_read(&mem->invalid);
-		mmap_write_unlock(current->mm);
+		up_write(&current->mm->mmap_sem);
 	}
 
 	mutex_lock(&mem->lock);
@@ -1571,10 +1572,9 @@ int amdgpu_amdkfd_gpuvm_get_vm_fault_info(struct kgd_dev *kgd,
 	struct amdgpu_device *adev;
 
 	adev = (struct amdgpu_device *)kgd;
-	if (atomic_read(&adev->gmc.vm_fault_info_updated) == 1) {
+	if (atomic_read_acquire(&adev->gmc.vm_fault_info_updated) == 1) {
 		*mem = *adev->gmc.vm_fault_info;
-		mb();
-		atomic_set(&adev->gmc.vm_fault_info_updated, 0);
+		atomic_set_release(&adev->gmc.vm_fault_info_updated, 0);
 	}
 	return 0;
 }

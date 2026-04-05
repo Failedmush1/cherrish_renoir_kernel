@@ -149,9 +149,6 @@ void tcp_time_wait(struct sock *sk, int state, int timeo);
 						 * most likely due to retrans in 3WHS.
 						 */
 
-/* Number of full MSS to receive before Acking RFC2581 */
-#define TCP_DELACK_SEG          1
-
 #define TCP_RESOURCE_PROBE_INTERVAL ((unsigned)(HZ/2U)) /* Maximal interval between probes
 					                 * for local resources.
 					                 */
@@ -255,11 +252,6 @@ extern long sysctl_tcp_mem[3];
 #define TCP_RACK_NO_DUPTHRESH    0x4 /* Do not use DUPACK threshold in RACK */
 
 extern atomic_long_t tcp_memory_allocated;
-
-/* sysctl variables for controlling various tcp parameters */
-extern int sysctl_tcp_delack_seg;
-extern int sysctl_tcp_use_userconfig;
-
 extern struct percpu_counter tcp_sockets_allocated;
 extern unsigned long tcp_memory_pressure;
 
@@ -354,15 +346,6 @@ ssize_t tcp_splice_read(struct socket *sk, loff_t *ppos,
 			struct pipe_inode_info *pipe, size_t len,
 			unsigned int flags);
 
-/* sysctl master controller */
-extern int tcp_use_userconfig_sysctl_handler(struct ctl_table *table,
-				int write, void __user *buffer, size_t *length,
-				loff_t *ppos);
-extern int tcp_proc_delayed_ack_control(struct ctl_table *table, int write,
-				void __user *buffer, size_t *length,
-				loff_t *ppos);
-
-void tcp_enter_quickack_mode(struct sock *sk, unsigned int max_quickacks);
 static inline void tcp_dec_quickack_mode(struct sock *sk)
 {
 	struct inet_connection_sock *icsk = inet_csk(sk);
@@ -408,6 +391,7 @@ void tcp_update_metrics(struct sock *sk);
 void tcp_init_metrics(struct sock *sk);
 void tcp_metrics_init(void);
 bool tcp_peer_is_proven(struct request_sock *req, struct dst_entry *dst);
+void __tcp_close(struct sock *sk, long timeout);
 void tcp_close(struct sock *sk, long timeout);
 void tcp_init_sock(struct sock *sk);
 void tcp_init_transfer(struct sock *sk, int bpf_op);
@@ -2091,9 +2075,26 @@ static inline s64 tcp_rto_delta_us(const struct sock *sk)
 {
 	const struct sk_buff *skb = tcp_rtx_queue_head(sk);
 	u32 rto = inet_csk(sk)->icsk_rto;
-	u64 rto_time_stamp_us = tcp_skb_timestamp_us(skb) + jiffies_to_usecs(rto);
 
-	return rto_time_stamp_us - tcp_sk(sk)->tcp_mstamp;
+	if (likely(skb)) {
+		u64 rto_time_stamp_us = tcp_skb_timestamp_us(skb) + jiffies_to_usecs(rto);
+
+		return rto_time_stamp_us - tcp_sk(sk)->tcp_mstamp;
+	} else {
+		WARN_ONCE(1,
+			"rtx queue emtpy: "
+			"out:%u sacked:%u lost:%u retrans:%u "
+			"tlp_high_seq:%u sk_state:%u ca_state:%u "
+			"advmss:%u mss_cache:%u pmtu:%u\n",
+			tcp_sk(sk)->packets_out, tcp_sk(sk)->sacked_out,
+			tcp_sk(sk)->lost_out, tcp_sk(sk)->retrans_out,
+			tcp_sk(sk)->tlp_high_seq, sk->sk_state,
+			inet_csk(sk)->icsk_ca_state,
+			tcp_sk(sk)->advmss, tcp_sk(sk)->mss_cache,
+			inet_csk(sk)->icsk_pmtu_cookie);
+		return jiffies_to_usecs(rto);
+	}
+
 }
 
 /*

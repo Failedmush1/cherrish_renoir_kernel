@@ -140,10 +140,9 @@ endmenu
 endif # BLOCK
 
 if BLOCK
-menu "DOS/FAT/EXFAT/NT Filesystems"
+menu "DOS/FAT/NT Filesystems"
 
 source "fs/fat/Kconfig"
-source "fs/exfat/Kconfig"
 source "fs/ntfs/Kconfig"
 
 endmenu
@@ -294,6 +293,7 @@ config GRACE_PERIOD
 config LOCKD
 	tristate
 	depends on FILE_LOCKING
+	select CRC32
 	select GRACE_PERIOD
 
 config LOCKD_V4

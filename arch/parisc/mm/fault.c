@@ -274,7 +274,7 @@ void do_page_fault(struct pt_regs *regs, unsigned long code,
 	if (!mm)
 		goto no_context;
 
-	flags = FAULT_FLAG_DEFAULT;
+	flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
 	if (user_mode(regs))
 		flags |= FAULT_FLAG_USER;
 
@@ -282,7 +282,7 @@ void do_page_fault(struct pt_regs *regs, unsigned long code,
 	if (acc_type & VM_WRITE)
 		flags |= FAULT_FLAG_WRITE;
 retry:
-	mmap_read_lock(mm);
+	down_read(&mm->mmap_sem);
 	vma = find_vma_prev(mm, address, &prev_vma);
 	if (!vma || address < vma->vm_start)
 		goto check_expansion;
@@ -304,7 +304,7 @@ good_area:
 
 	fault = handle_mm_fault(vma, address, flags);
 
-	if (fault_signal_pending(fault, regs))
+	if ((fault & VM_FAULT_RETRY) && fatal_signal_pending(current))
 		return;
 
 	if (unlikely(fault & VM_FAULT_ERROR)) {
@@ -328,16 +328,18 @@ good_area:
 		else
 			current->min_flt++;
 		if (fault & VM_FAULT_RETRY) {
+			flags &= ~FAULT_FLAG_ALLOW_RETRY;
+
 			/*
 			 * No need to up_read(&mm->mmap_sem) as we would
 			 * have already released it in __lock_page_or_retry
 			 * in mm/filemap.c.
 			 */
-			flags |= FAULT_FLAG_TRIED;
+
 			goto retry;
 		}
 	}
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 	return;
 
 check_expansion:
@@ -349,7 +351,7 @@ check_expansion:
  * Something tried to access memory that isn't in our memory map..
  */
 bad_area:
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 
 	if (user_mode(regs)) {
 		int signo, si_code;
@@ -421,7 +423,7 @@ no_context:
 	parisc_terminate("Bad Address (null pointer deref?)", regs, code, address);
 
   out_of_memory:
-	mmap_read_unlock(mm);
+	up_read(&mm->mmap_sem);
 	if (!user_mode(regs))
 		goto no_context;
 	pagefault_out_of_memory();

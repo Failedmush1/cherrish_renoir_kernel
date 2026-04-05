@@ -16,7 +16,6 @@
 #include <linux/timer.h>
 #include <linux/kernel.h>
 #include <linux/usb/hcd.h>
-#include <linux/usb/xhci-sec.h>
 #include <linux/io-64-nonatomic-lo-hi.h>
 
 /* Code sharing between pci-quirks and xhci hcd */
@@ -230,7 +229,7 @@ struct xhci_op_regs {
 #define CMD_ETE		(1 << 14)
 /* bits 15:31 are reserved (and should be preserved on writes). */
 
-#define XHCI_RESET_LONG_USEC		(1000 * 1000)
+#define XHCI_RESET_LONG_USEC		(10 * 1000 * 1000)
 #define XHCI_RESET_SHORT_USEC		(250 * 1000)
 
 /* IMAN - Interrupt Management Register */
@@ -444,8 +443,8 @@ struct xhci_op_regs {
 #define PORT_L1_TIMEOUT(p)(((p) & 0xff) << 2)
 #define PORT_BESLD(p)(((p) & 0xf) << 10)
 
-/* use 128 microseconds as USB2 LPM L1 default timeout. */
-#define XHCI_L1_TIMEOUT		128
+/* use 512 microseconds as USB2 LPM L1 default timeout. */
+#define XHCI_L1_TIMEOUT		512
 
 /* Set default HIRD/BESL value to 4 (350/400us) for USB2 L1 LPM resume latency.
  * Safe to use with mixed HIRD and BESL systems (host and device) and is used
@@ -1279,7 +1278,7 @@ enum xhci_setup_dev {
 /* Set TR Dequeue Pointer command TRB fields, 6.4.3.9 */
 #define TRB_TO_STREAM_ID(p)		((((p) & (0xffff << 16)) >> 16))
 #define STREAM_ID_FOR_TRB(p)		((((p)) & 0xffff) << 16)
-#define SCT_FOR_TRB(p)			(((p) << 1) & 0x7)
+#define SCT_FOR_TRB(p)			(((p) & 0x7) << 1)
 
 /* Link TRB specific fields */
 #define TRB_TC			(1<<1)
@@ -1750,8 +1749,6 @@ struct xhci_hcd {
 	struct xhci_doorbell_array __iomem *dba;
 	/* Our HCD's current interrupter register set */
 	struct	xhci_intr_reg __iomem *ir_set;
-	/* secondary interrupter */
-	struct	xhci_intr_reg __iomem **sec_ir_set;
 
 	/* Cached register copies of read-only HC data */
 	__u32		hcs_params1;
@@ -1795,11 +1792,6 @@ struct xhci_hcd {
 	struct xhci_command	*current_cmd;
 	struct xhci_ring	*event_ring;
 	struct xhci_erst	erst;
-
-	/* secondary event ring and erst */
-	struct xhci_ring	**sec_event_ring;
-	struct xhci_erst	*sec_erst;
-
 	/* Scratchpad */
 	struct xhci_scratchpad  *scratchpad;
 	/* Store LPM test failed devices' information */
@@ -2000,7 +1992,7 @@ void xhci_dbg_trace(struct xhci_hcd *xhci, void (*trace)(struct va_format *),
 /* xHCI memory management */
 void xhci_mem_cleanup(struct xhci_hcd *xhci);
 int xhci_mem_init(struct xhci_hcd *xhci, gfp_t flags);
-void xhci_free_virt_device(struct xhci_hcd *xhci, int slot_id);
+void xhci_free_virt_device(struct xhci_hcd *xhci, struct xhci_virt_device *dev, int slot_id);
 int xhci_alloc_virt_device(struct xhci_hcd *xhci, int slot_id, struct usb_device *udev, gfp_t flags);
 int xhci_setup_addressable_virt_dev(struct xhci_hcd *xhci, struct usb_device *udev);
 void xhci_copy_ep0_dequeue_into_input_ctx(struct xhci_hcd *xhci,
@@ -2076,8 +2068,6 @@ void xhci_free_container_ctx(struct xhci_hcd *xhci,
 /* xHCI host controller glue */
 typedef void (*xhci_get_quirks_t)(struct device *, struct xhci_hcd *);
 int xhci_handshake(void __iomem *ptr, u32 mask, u32 done, u64 timeout_us);
-int xhci_handshake_check_state(struct xhci_hcd *xhci,
-		void __iomem *ptr, u32 mask, u32 done, int usec);
 void xhci_quiesce(struct xhci_hcd *xhci);
 int xhci_halt(struct xhci_hcd *xhci);
 int xhci_start(struct xhci_hcd *xhci);
@@ -2092,6 +2082,7 @@ void xhci_reset_bandwidth(struct usb_hcd *hcd, struct usb_device *udev);
 int xhci_update_hub_device(struct usb_hcd *hcd, struct usb_device *hdev,
 			   struct usb_tt *tt, gfp_t mem_flags);
 int xhci_disable_slot(struct xhci_hcd *xhci, u32 slot_id);
+int xhci_disable_and_free_slot(struct xhci_hcd *xhci, u32 slot_id);
 int xhci_ext_cap_init(struct xhci_hcd *xhci);
 
 int xhci_suspend(struct xhci_hcd *xhci, bool do_wakeup);
@@ -2623,35 +2614,6 @@ static inline const char *xhci_decode_portsc(char *str, u32 portsc)
 	return str;
 }
 
-static inline const char *xhci_decode_doorbell(u32 slot, u32 doorbell)
-{
-	static char str[256];
-	u8 ep;
-	u16 stream;
-	int ret;
-
-	ep = (doorbell & 0xff);
-	stream = doorbell >> 16;
-
-	if (slot == 0) {
-		sprintf(str, "Command Ring %d", doorbell);
-		return str;
-	}
-	ret = sprintf(str, "Slot %d ", slot);
-	if (ep > 0 && ep < 32)
-		ret = sprintf(str + ret, "ep%d%s",
-			      ep / 2,
-			      ep % 2 ? "in" : "out");
-	else if (ep == 0 || ep < 248)
-		ret = sprintf(str + ret, "Reserved %d", ep);
-	else
-		ret = sprintf(str + ret, "Vendor Defined %d", ep);
-	if (stream)
-		ret = sprintf(str + ret, " Stream %d", stream);
-
-	return str;
-}
-
 static inline const char *xhci_ep_state_string(u8 state)
 {
 	switch (state) {
@@ -2745,9 +2707,5 @@ static inline const char *xhci_decode_ep_context(u32 info, u32 info2, u64 deq,
 
 	return str;
 }
-
-/* EHSET */
-int xhci_submit_single_step_set_feature(struct usb_hcd *hcd, struct urb *urb,
-					int is_setup);
 
 #endif /* __LINUX_XHCI_HCD_H */
